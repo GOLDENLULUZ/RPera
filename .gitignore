@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+/config/
+/saves/
+/.deleted_saves/
+/data/.content-staging/
+/data/worlds/*
+!/data/worlds/雾港/
+/data/mods/*
+!/data/mods/读心大师/
+/data/styles/*
+!/data/styles/冷峻悬疑.md
+.env
+.env.*

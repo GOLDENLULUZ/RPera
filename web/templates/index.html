@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RPera</title>
+    <link rel="stylesheet" href="/static/app.css?v={{ static_version }}">
+</head>
+<body>
+    <div class="shell">
+        <header class="topbar">
+            <div class="brand"><span class="prompt">&gt;</span> RPERA <span class="version">0.1.0</span></div>
+            <nav class="view-switch" aria-label="视图切换">
+                <button id="adventure-button" class="switch active" type="button">[ 冒险 ]</button>
+                <button id="foreground-button" class="switch hidden" type="button">[ 前台 ]</button>
+                <button id="backend-button" class="switch hidden" type="button">[ 后台 ]</button>
+                <button id="creation-button" class="switch" type="button">[ 创作 ]</button>
+                <button id="settings-button" class="switch" type="button">[ 设置 ]</button>
+            </nav>
+            <div id="connection-status" class="connection">未连接</div>
+        </header>
+
+        <main>
+            <section id="launcher" class="launcher">
+                <div class="terminal-title">// 开始冒险</div>
+                <p class="muted">选择只读世界观。RPera 将创建完全隔离的存档与世界快照。</p>
+                <div id="world-list" class="world-list" aria-live="polite"></div>
+
+                <div class="terminal-title spaced">// 继续存档</div>
+                <div id="save-list" class="save-list" aria-live="polite"></div>
+                <nav id="save-pagination" class="save-pagination hidden" aria-label="存档分页">
+                    <button id="previous-save-page" type="button">[ 上一页 ]</button>
+                    <span id="save-page-status" class="muted"></span>
+                    <button id="next-save-page" type="button">[ 下一页 ]</button>
+                </nav>
+                <p id="launcher-status" class="launcher-status muted" role="status"></p>
+            </section>
+
+            <section id="workspace" class="workspace hidden">
+                <div class="workspace-head">
+                    <span id="save-label" class="save-label"></span>
+                </div>
+
+                <section id="foreground-view" class="view-panel">
+                    <div class="foreground-layout">
+                        <div class="foreground-main">
+                            <div id="story" class="story" aria-live="polite"></div>
+                            <div class="foreground-composer">
+                                <form id="turn-form" class="command-line">
+                                    <label for="player-input" class="prompt">&gt;</label>
+                                    <div class="command-editor">
+                                        <div id="pending-images" class="pending-images hidden" aria-label="待上传图片"></div>
+                                        <textarea id="player-input" rows="2" maxlength="20000" placeholder="描述你的行动……"></textarea>
+                                    </div>
+                                    <div class="command-actions">
+                                        <button id="add-image-button" type="button">+ 图片</button>
+                                        <button id="send-button" type="submit">执行</button>
+                                        <input id="image-input" class="hidden" type="file" accept="image/png,image/jpeg" multiple>
+                                    </div>
+                                </form>
+                                <div class="status-line">
+                                    <span id="turn-status" class="muted">等待输入</span>
+                                    <div class="turn-actions">
+                                        <button id="abort-turn-button" class="text-button hidden" type="button">[ 中止本回合 ]</button>
+                                        <button id="retry-turn-button" class="text-button hidden" type="button">[ 从断点重试 ]</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <nav id="turn-navigation" class="turn-navigation hidden" aria-label="回合导航">
+                            <button id="turn-navigation-toggle" class="turn-navigation-toggle" type="button" aria-controls="turn-navigation-panel" aria-expanded="false"></button>
+                            <div id="turn-navigation-panel" class="turn-navigation-panel">
+                                <div class="turn-navigation-title">// 回合</div>
+                                <div id="turn-navigation-list" class="turn-navigation-list"></div>
+                                <button id="turn-navigation-latest" class="turn-navigation-latest" type="button">↓ 最新</button>
+                            </div>
+                        </nav>
+                    </div>
+                </section>
+
+                <section id="backend-view" class="view-panel hidden">
+                    <header class="backend-page-head settings-page-head">
+                        <div class="terminal-title">// 后台</div>
+                        <nav class="settings-section-nav" aria-label="后台分类">
+                            <button class="settings-section-switch active" type="button" data-backend-section="trace" aria-pressed="true">[ 运行记录 ]</button>
+                            <button class="settings-section-switch" type="button" data-backend-section="entities" aria-pressed="false">[ 存档实体 ]</button>
+                        </nav>
+                    </header>
+                    <section id="backend-trace-panel">
+                        <div class="backend-toolbar">
+                            <div>
+                                <span class="terminal-title">// 运行记录</span>
+                                <span id="event-count" class="muted">0 条记录</span>
+                            </div>
+                            <span class="muted">代理动作与回复</span>
+                        </div>
+                        <div id="event-stream" class="event-stream" aria-live="polite"></div>
+                        <nav id="event-pagination" class="save-pagination hidden" aria-label="运行事件分页">
+                            <button id="previous-event-page" type="button">[ 上一页 ]</button>
+                            <span id="event-page-status" class="muted"></span>
+                            <button id="next-event-page" type="button">[ 下一页 ]</button>
+                        </nav>
+                    </section>
+                    <section id="backend-entities-panel" class="hidden">
+                        <div class="creation-panel-head backend-entities-head">
+                            <div>
+                                <span class="terminal-title">// 存档实体</span>
+                                <p class="muted">只修改当前存档快照；新实体创建在世界快照中。回合执行期间不可修改。</p>
+                            </div>
+                            <button id="new-save-entity-button" type="button">+ 新建实体</button>
+                        </div>
+                        <div class="entity-layout backend-entity-layout">
+                            <aside id="save-entity-list" class="creation-entity-list" aria-label="存档实体列表"></aside>
+                            <div id="save-entity-empty" class="empty">选择一个实体</div>
+                            <div id="save-entity-editor" class="entity-editor hidden">
+                                <p id="save-entity-path" class="muted backend-entity-path"></p>
+                                <form id="save-entity-identity-form" class="creation-form entity-identity-form">
+                                    <label>名称<input id="save-entity-name" type="text" maxlength="80" required></label>
+                                    <label>类型<select id="save-entity-type" required>
+                                        <option value="character">角色</option><option value="location">地点</option>
+                                        <option value="event">事件</option><option value="item">物品</option>
+                                        <option value="organization">组织</option><option value="rule">规则</option>
+                                        <option value="player_trait">玩家特质</option>
+                                    </select></label>
+                                    <div class="creation-actions wide-field"><button type="submit">应用名称与类型</button></div>
+                                </form>
+                                <form id="save-entity-content-form" class="creation-form separated-form">
+                                    <label class="wide-field">描述<textarea id="save-entity-description" rows="3" maxlength="4000"></textarea></label>
+                                    <label class="wide-field">别名（仅用英文半角逗号 , 分隔）<input id="save-entity-aliases" type="text" maxlength="1700"></label>
+                                    <p class="muted wide-field">可见性：world_truth。</p>
+                                    <label class="checkbox-field wide-field"><input id="save-entity-required" type="checkbox"><span>长期必需信息：自动注入相关代理上下文，会增加模型成本。</span></label>
+                                    <label class="wide-field">正文<textarea id="save-entity-content" class="content-textarea" rows="16" maxlength="100000"></textarea></label>
+                                    <div class="creation-actions wide-field"><button type="submit">保存实体内容</button><button id="delete-save-entity-button" class="danger" type="button">删除实体</button></div>
+                                </form>
+                            </div>
+                        </div>
+                        <p id="save-entity-status" class="creation-status muted" role="status" aria-live="polite"></p>
+                    </section>
+                </section>
+            </section>
+
+            <dialog id="image-preview-dialog" class="image-preview-dialog">
+                <button id="close-image-preview" class="text-button" type="button">[ 关闭 ]</button>
+                <img id="image-preview" alt="图片预览">
+            </dialog>
+
+            <section id="creation-view" class="creation-page hidden">
+                <header class="creation-head">
+                    <div>
+                        <div class="terminal-title">// CONTENT WORKSHOP</div>
+                        <p id="creation-description" class="muted">直接编辑世界与模组源文件；已有存档快照不会随之改变。</p>
+                    </div>
+                    <nav class="creation-source-tabs" aria-label="创作来源类型">
+                        <button class="creation-source-switch active" type="button" data-creation-kind="worlds" aria-pressed="true">[ 世界 ]</button>
+                        <button class="creation-source-switch" type="button" data-creation-kind="mods" aria-pressed="false">[ 模组 ]</button>
+                        <button class="creation-source-switch" type="button" data-creation-kind="styles" aria-pressed="false">[ 文风 ]</button>
+                    </nav>
+                </header>
+                <div class="creation-layout">
+                    <aside class="creation-master">
+                        <div class="creation-master-head">
+                            <span id="creation-source-label">世界列表</span>
+                            <button id="new-source-button" type="button">+ 新建</button>
+                        </div>
+                        <div id="creation-source-list" class="creation-source-list" aria-live="polite"></div>
+                    </aside>
+                    <section class="creation-detail">
+                        <div id="creation-empty" class="empty">选择一个世界开始编辑</div>
+                        <div id="creation-editor" class="hidden">
+                            <header class="creation-detail-head">
+                                <div>
+                                    <strong id="creation-selected-name"></strong>
+                                    <span id="creation-selected-path" class="muted"></span>
+                                </div>
+                                <button id="delete-source-button" class="danger" type="button">删除来源</button>
+                            </header>
+                            <nav class="creation-detail-tabs" aria-label="来源编辑分类">
+                                <button class="creation-detail-switch active" type="button" data-creation-section="basic" aria-pressed="true">[ 基本信息 ]</button>
+                                <button class="creation-detail-switch" type="button" data-creation-section="scenarios" aria-pressed="false">[ 场景 ]</button>
+                                <button class="creation-detail-switch" type="button" data-creation-section="entities" aria-pressed="false">[ 实体 ]</button>
+                            </nav>
+                            <section id="creation-basic-panel" class="creation-panel">
+                                <form id="source-rename-form" class="creation-form compact-form">
+                                    <label>名称<input id="source-name" type="text" maxlength="80" required></label>
+                                    <div class="creation-actions"><button type="submit">应用改名</button></div>
+                                </form>
+                                <form id="source-content-form" class="creation-form separated-form">
+                                    <label>描述<textarea id="source-description" rows="8" maxlength="4000"></textarea></label>
+                                    <div class="creation-actions"><button type="submit">保存描述</button></div>
+                                </form>
+                            </section>
+                            <section id="creation-scenarios-panel" class="creation-panel hidden">
+                                <div class="creation-panel-head">
+                                    <span class="terminal-title">// SCENARIOS</span>
+                                    <button id="new-scenario-button" type="button">+ 空白草稿</button>
+                                </div>
+                                <div id="creation-scenario-list" class="creation-scenario-list"></div>
+                            </section>
+                            <section id="creation-entities-panel" class="creation-panel hidden">
+                                <div class="creation-panel-head">
+                                    <span class="terminal-title">// ENTITIES</span>
+                                    <button id="new-entity-button" type="button">+ 新建实体</button>
+                                </div>
+                                <div class="entity-layout">
+                                    <aside id="creation-entity-list" class="creation-entity-list"></aside>
+                                    <div id="entity-editor-empty" class="empty">选择一个实体</div>
+                                    <div id="entity-editor" class="entity-editor hidden">
+                                        <form id="entity-identity-form" class="creation-form entity-identity-form">
+                                            <label>名称<input id="entity-name" type="text" maxlength="80" required></label>
+                                            <label>类型<select id="entity-type" required>
+                                                <option value="character">角色</option><option value="location">地点</option>
+                                                <option value="event">事件</option><option value="item">物品</option>
+                                                <option value="organization">组织</option><option value="rule">规则</option>
+                                                <option value="player_trait">玩家特质</option>
+                                            </select></label>
+                                            <div class="creation-actions wide-field"><button type="submit">应用名称与类型</button></div>
+                                        </form>
+                                        <form id="entity-content-form" class="creation-form separated-form">
+                                            <label class="wide-field">描述<textarea id="entity-description" rows="3" maxlength="4000"></textarea></label>
+                                            <label class="wide-field">别名（仅用英文半角逗号 , 分隔）<input id="entity-aliases" type="text" maxlength="1700"></label>
+                                            <p class="muted wide-field">可见性：world_truth。目前只是已保存元数据，不代表已实现访问控制。</p>
+                                            <label class="checkbox-field wide-field"><input id="entity-required" type="checkbox"><span>长期必需信息：自动注入世界研究及新建的角色扮演、文风规划、叙事代理上下文，会增加模型成本。</span></label>
+                                            <label class="wide-field">正文<textarea id="entity-content" class="content-textarea" rows="16" maxlength="100000"></textarea></label>
+                                            <div class="creation-actions wide-field"><button type="submit">保存实体内容</button><button id="delete-entity-button" class="danger" type="button">删除实体</button></div>
+                                        </form>
+                                    </div>
+                                </div>
+                            </section>
+                        </div>
+                        <div id="style-editor" class="hidden">
+                            <header class="creation-detail-head">
+                                <div>
+                                    <strong id="style-selected-name"></strong>
+                                    <span id="style-selected-path" class="muted"></span>
+                                </div>
+                                <div class="creation-detail-actions">
+                                    <button id="toggle-style-enabled-button" type="button">禁用文风</button>
+                                    <button id="delete-style-button" class="danger" type="button">删除文风</button>
+                                </div>
+                            </header>
+                            <section class="creation-panel">
+                                <form id="style-rename-form" class="creation-form compact-form">
+                                    <label>名称<input id="style-name" type="text" maxlength="80" required></label>
+                                    <div class="creation-actions"><button type="submit">应用改名</button></div>
+                                </form>
+                                <form id="style-content-form" class="creation-form separated-form">
+                                    <label>简介<textarea id="style-description" rows="4" maxlength="4000"></textarea></label>
+                                    <label>完整写作要求<textarea id="style-content" class="content-textarea" rows="16" maxlength="100000"></textarea></label>
+                                    <div class="creation-actions"><button type="submit">保存文风</button></div>
+                                </form>
+                            </section>
+                        </div>
+                        <p id="creation-status" class="creation-status muted" role="status" aria-live="polite"></p>
+                    </section>
+                </div>
+            </section>
+
+            <section id="settings-view" class="settings-page hidden">
+                <header class="settings-page-head">
+                    <div class="terminal-title">// SETTINGS</div>
+                    <nav class="settings-section-nav" aria-label="设置分类">
+                        <button class="settings-section-switch active" type="button" data-settings-section="ai">[ AI 模型 ]</button>
+                        <button class="settings-section-switch" type="button" data-settings-section="drawing">[ 绘画接口 ]</button>
+                        <button class="settings-section-switch" type="button" data-settings-section="capability">[ 能力 ]</button>
+                        <button class="settings-section-switch" type="button" data-settings-section="general">[ 通用 ]</button>
+                    </nav>
+                </header>
+                <section id="ai-settings-panel" class="settings-section-panel">
+                <div class="settings-heading">
+                    <div>
+                        <div class="terminal-title">// AI PRESETS</div>
+                        <p class="muted">每个 Preset 将 AI 源、模型、密钥与生成参数保存为一个整体。</p>
+                    </div>
+                    <button id="new-preset-button" type="button">+ 新建 Preset</button>
+                </div>
+                <div class="preset-layout">
+                    <aside id="preset-list" class="preset-list" aria-label="AI Preset 列表"></aside>
+                    <section class="preset-editor">
+                        <div class="preset-editor-head">
+                            <span id="preset-state" class="muted">选择一个 Preset</span>
+                            <div class="preset-actions">
+                                <button id="duplicate-preset-button" type="button">复制</button>
+                                <button id="delete-preset-button" type="button">删除</button>
+                            </div>
+                        </div>
+                        <form id="preset-form" autocomplete="off">
+                            <label class="wide-field">
+                                Preset 名称
+                                <input id="preset-name" name="name" type="text" maxlength="80" required>
+                            </label>
+                            <label>
+                                AI Provider
+                                <select id="provider" name="provider">
+                                    <option value="deepseek">DeepSeek</option>
+                                    <option value="openai_compatible">OpenAI-compatible</option>
+                                    <option value="google_gemini">Google Gemini</option>
+                                    <option value="anthropic">Anthropic Claude</option>
+                                    <option value="xai">xAI Grok</option>
+                                </select>
+                            </label>
+                            <label id="xai-protocol-field" class="hidden">
+                                Grok API 协议
+                                <select id="xai-protocol" name="xai_protocol">
+                                    <option value="responses">Responses API（推荐）</option>
+                                    <option value="chat_completions">Chat Completions（兼容代理）</option>
+                                </select>
+                            </label>
+                            <label>
+                                Base URL
+                                <input id="base-url" name="base_url" type="url" required>
+                            </label>
+                            <label class="wide-field">
+                                API Key
+                                <input id="api-key" name="api_key" type="password" placeholder="留空则保留当前密钥">
+                                <span id="key-status" class="muted"></span>
+                            </label>
+                            <label class="model-field wide-field">
+                                Model
+                                <span class="inline-input">
+                                    <input id="model" name="model" type="text" required>
+                                    <button id="load-models-button" type="button">拉取模型</button>
+                                </span>
+                                <select id="model-select" disabled>
+                                    <option value="">尚未拉取模型</option>
+                                </select>
+                            </label>
+                            <label>
+                                Temperature
+                                <input id="temperature" name="temperature" type="number" min="0" max="2" step="0.1" required>
+                            </label>
+                            <label>
+                                Top P
+                                <input id="top-p" name="top_p" type="number" min="0.01" max="1" step="0.01" required>
+                            </label>
+                            <label>
+                                最大输出 Tokens
+                                <input id="max-tokens" name="max_tokens" type="number" min="1" max="1048576" required>
+                                <span class="muted">这是单次输出上限，不是模型的上下文窗口。</span>
+                            </label>
+                            <label>
+                                Timeout (s)
+                                <input id="timeout" name="timeout_seconds" type="number" min="5" max="600" required>
+                            </label>
+                            <div class="form-actions wide-field">
+                                <button type="submit">保存 Preset</button>
+                                <button id="test-preset-button" type="button">连接测试</button>
+                                <span id="settings-status" class="muted"></span>
+                            </div>
+                        </form>
+                    </section>
+                </div>
+                </section>
+                <section id="drawing-settings-panel" class="settings-section-panel hidden">
+                    <div class="settings-heading">
+                        <div>
+                            <div class="terminal-title">// DRAWING PRESETS</div>
+                            <p class="muted">绘画 Preset 可连接 Stable Diffusion WebUI 或 NovelAI。</p>
+                        </div>
+                        <button id="new-drawing-preset-button" type="button">+ 新建 Preset</button>
+                    </div>
+                    <div class="preset-layout">
+                        <aside id="drawing-preset-list" class="preset-list" aria-label="绘画 Preset 列表"></aside>
+                        <section class="preset-editor">
+                            <div class="preset-editor-head">
+                                <span id="drawing-preset-state" class="muted">选择一个 Preset</span>
+                                <div class="preset-actions">
+                                    <button id="set-default-drawing-preset-button" type="button">设为默认</button>
+                                    <button id="duplicate-drawing-preset-button" type="button">复制</button>
+                                    <button id="delete-drawing-preset-button" type="button">删除</button>
+                                </div>
+                            </div>
+                            <form id="drawing-preset-form" autocomplete="off">
+                                <label class="wide-field">Preset 名称<input id="drawing-preset-name" type="text" maxlength="80" required></label>
+                                <label>Provider<select id="drawing-provider"><option value="stable_diffusion_webui">Stable Diffusion WebUI</option><option value="novelai">NovelAI</option></select></label>
+                                <label>Base URL<input id="drawing-base-url" type="url" required></label>
+                                <label class="drawing-webui-field">Basic Auth 用户名<input id="drawing-auth-username" type="text"></label>
+                                <label class="drawing-webui-field">Basic Auth 密码<input id="drawing-auth-password" type="password" placeholder="留空保留已保存密码"><span id="drawing-auth-status" class="muted"></span><span class="checkbox-line"><input id="clear-drawing-auth-password" type="checkbox"><span>保存时清除密码</span></span></label>
+                                <label class="drawing-novelai-field hidden">API Token<input id="drawing-api-key" type="password" placeholder="留空保留已保存 Token"><span id="drawing-api-key-status" class="muted"></span><span class="checkbox-line"><input id="clear-drawing-api-key" type="checkbox"><span>保存时清除 Token</span></span></label>
+                                <label class="drawing-novelai-field hidden">NovelAI 模型<select id="drawing-model"><option value="nai-diffusion-5-full">V5 Full</option><option value="nai-diffusion-5-curated">V5 Curated</option><option value="nai-diffusion-4-5-full">V4.5 Full</option><option value="nai-diffusion-4-5-curated">V4.5 Curated</option></select></label>
+                                <label>Timeout (s)<input id="drawing-timeout" type="number" min="5" max="600" required></label>
+                                <div class="form-actions wide-field"><button type="submit">保存 Preset</button><button id="test-drawing-preset-button" type="button">连接测试</button><span id="drawing-settings-status" class="muted" role="status" aria-live="polite"></span></div>
+                            </form>
+                        </section>
+                    </div>
+                    <section class="drawing-test"><div class="terminal-title">// GENERATION TEST</div><p class="muted">仅输入本次画面内容；服务端会与“角色立绘生成”能力配置组合。</p><label>正面内容词<textarea id="drawing-test-content" rows="3" maxlength="8000" placeholder="例如：雨夜的雾港码头，提灯的侦探" required></textarea></label><div class="form-actions"><button id="generate-drawing-test-button" type="button">生成测试图</button><span id="drawing-test-status" class="muted" role="status" aria-live="polite"></span></div><img id="drawing-test-image" class="drawing-test-image hidden" alt="绘画测试结果"></section>
+                </section>
+                <section id="capability-settings-panel" class="settings-section-panel hidden">
+                    <div class="settings-heading">
+                        <div>
+                            <div class="terminal-title">// CAPABILITIES</div>
+                            <p class="muted">配置角色立绘生成参数；使用默认绘画 Preset 对应的接口。</p>
+                        </div>
+                    </div>
+                    <div class="preset-layout capability-layout">
+                        <aside class="preset-list" aria-label="能力列表">
+                            <button class="preset-item selected" type="button" aria-pressed="true"><span class="preset-item-name">角色立绘生成</span><span class="preset-item-meta">Character Portrait Generation</span></button>
+                        </aside>
+                        <section class="preset-editor">
+                            <div class="preset-editor-head"><span class="muted">编辑能力配置</span></div>
+                            <form id="capability-settings-form" autocomplete="off">
+                                <label class="checkbox-line wide-field"><input id="capability-enabled" type="checkbox"><span>启用角色立绘生成</span></label>
+                                <label class="wide-field capability-webui-field">Checkpoint<span class="inline-input"><select id="capability-checkpoint"><option value="">尚未拉取资源</option></select><button id="load-capability-resources-button" type="button">拉取 WebUI 配置</button></span></label>
+                                <label class="capability-webui-field">Sampler<select id="capability-sampler"><option value="">尚未拉取资源</option></select></label>
+                                <label class="capability-webui-field">Scheduler<select id="capability-scheduler"><option value="">尚未拉取资源</option></select></label>
+                                <label class="capability-novelai-field hidden">NovelAI Sampler<select id="capability-novelai-sampler"><option value="k_euler_ancestral">Euler Ancestral</option><option value="k_euler">Euler</option><option value="k_dpmpp_2m">DPM++ 2M</option><option value="k_dpmpp_sde">DPM++ SDE</option></select><span class="muted">NovelAI 要求 Steps ≤ 50、CFG ≤ 10、宽高为 64 的倍数且 ≤ 1600。</span></label>
+                                <label>Steps<input id="capability-steps" type="number" min="1" max="150" required></label>
+                                <label>CFG Scale<input id="capability-cfg-scale" type="number" min="0" max="30" step="0.5" required></label>
+                                <label>宽度<input id="capability-width" type="number" min="64" max="2048" step="8" required></label>
+                                <label>高度<input id="capability-height" type="number" min="64" max="2048" step="8" required></label>
+                                <label class="wide-field">正面质量/风格词<textarea id="capability-positive-prompt" rows="4" maxlength="8000"></textarea></label>
+                                <label class="wide-field">负面质量/风格词<textarea id="capability-negative-prompt" rows="4" maxlength="8000"></textarea></label>
+                                <div class="form-actions wide-field"><button type="submit">保存能力设置</button><span id="capability-settings-status" class="muted" role="status" aria-live="polite"></span></div>
+                            </form>
+                        </section>
+                    </div>
+                </section>
+                <section id="general-settings-panel" class="settings-section-panel hidden">
+                <section class="runtime-settings">
+                    <div>
+                        <div class="terminal-title">// GENERAL SETTINGS</div>
+                        <p class="muted settings-intro">为各 Agent 选择 Preset 与执行选项。未单独指定的子 Agent 跟随主代理；禁用 Agent 后，其专属选项不生效。</p>
+                        <details class="settings-help">
+                            <summary>查看选项说明</summary>
+                            <p>“强制开始委派”会在主会话尚无回复时，把首次纯文本回复改为委派；满足条件的 retry 同样生效。“禁止读取 narrative.md”会移除主代理的草稿读取工具，但不影响委派或发布。</p>
+                            <p>子 Agent 的“强制附加报告”会把本回合已完成的报告传给后续委派；靠后的子 Agent 只有在该报告产生后才能接受委派。</p>
+                            <p>叙事 Agent 的“强制发布”会在 narrative.md 已存在且主代理仅返回文本时自动发布。</p>
+                        </details>
+                    </div>
+                    <form id="runtime-settings-form" class="runtime-settings-form">
+                        <div id="agent-preset-fields" class="agent-preset-fields"></div>
+                        <p class="muted wide-field">流式模式用于保持 RPera 与模型服务之间的长请求连接，降低 Cloudflare 524 超时。Agent 仍会在完成后一次性返回结果，不会逐字显示故事。</p>
+                        <p class="muted wide-field">尾部续写会在每次模型请求的聊天记录末尾临时追加该 Agent 的 <code>prefills/&lt;Agent 名称&gt;.md</code> 作为 assistant 消息；不会写入 session 消息历史。文件在新回合或 retry 开始时读取并冻结。</p>
+                        <label>
+                            可见故事历史回合数
+                            <input id="context-turns" name="context_turns" type="number" min="2" step="1" required>
+                            <span class="muted">所有 Agent 统一使用。默认 4，最小 2；只包含此前已完成并发布的故事回合。</span>
+                        </label>
+                        <label>
+                            每轮最大委派次数
+                            <input id="max-delegations" name="max_delegations" type="number" min="4" step="1" required>
+                            <span class="muted">默认 20，最小 4。Runtime 设置在新回合或 retry 开始时生效。</span>
+                        </label>
+                        <div class="form-actions">
+                            <button type="submit">保存 Runtime 设置</button>
+                            <span id="runtime-settings-status" class="muted"></span>
+                        </div>
+                    </form>
+                </section>
+                <section class="runtime-settings">
+                    <div>
+                        <div class="terminal-title">// NETWORK PROXY</div>
+                        <p class="muted">为 AI 与绘画接口配置统一代理。本机和局域网目标会自动直连。</p>
+                    </div>
+                    <form id="network-settings-form" class="runtime-settings-form">
+                        <label>
+                            网络模式
+                            <select id="network-mode" name="mode">
+                                <option value="direct">直连</option>
+                                <option value="custom">自定义代理</option>
+                            </select>
+                            <span class="muted">直连模式不会读取 WSL 的代理环境变量。</span>
+                        </label>
+                        <label>
+                            代理地址
+                            <input id="proxy-url" name="proxy_url" type="url" placeholder="http://192.168.1.10:7890">
+                            <span class="muted">支持 HTTP(S)、SOCKS5 和 SOCKS5H；SOCKS5H 可由代理端解析域名。</span>
+                        </label>
+                        <label>
+                            代理用户名（可选）
+                            <input id="proxy-username" name="proxy_username" type="text" autocomplete="username">
+                        </label>
+                        <label>
+                            代理密码（可选）
+                            <input id="proxy-password" name="proxy_password" type="password" autocomplete="new-password">
+                            <span id="proxy-password-hint" class="muted"></span>
+                        </label>
+                        <label class="checkbox-line">
+                            <input id="clear-proxy-password" type="checkbox">
+                            <span>清除已保存的代理密码</span>
+                        </label>
+                        <p class="muted">自动直连 localhost、私有及链路本地 IP、.local 和单标签局域网主机。</p>
+                        <div class="form-actions">
+                            <button type="submit">保存网络设置</button>
+                            <span id="network-settings-status" class="muted"></span>
+                        </div>
+                    </form>
+                </section>
+                </section>
+            </section>
+        </main>
+
+        <dialog id="rename-save-dialog" class="confirmation-dialog" aria-labelledby="rename-save-title">
+            <form id="rename-save-form" method="dialog">
+                <div id="rename-save-title" class="terminal-title">// 重命名存档</div>
+                <label class="dialog-field">存档名称<input id="rename-save-name" type="text" maxlength="80" required></label>
+                <p id="rename-save-error" class="error-text hidden" role="alert"></p>
+                <div class="confirmation-actions">
+                    <button value="cancel" type="submit">取消</button>
+                    <button id="rename-save-submit" value="rename" type="submit">保存</button>
+                </div>
+            </form>
+        </dialog>
+        <dialog id="branch-save-dialog" class="confirmation-dialog" aria-labelledby="branch-save-title">
+            <form id="branch-save-form" method="dialog">
+                <div id="branch-save-title" class="terminal-title">// 从历史回合创建分支</div>
+                <p id="branch-save-origin" class="muted"></p>
+                <label class="dialog-field">新存档名称<input id="branch-save-name" type="text" maxlength="80" required></label>
+                <p id="branch-save-error" class="error-text hidden" role="alert"></p>
+                <div class="confirmation-actions">
+                    <button value="cancel" type="submit">取消</button>
+                    <button id="branch-save-submit" value="branch" type="submit">创建分支</button>
+                </div>
+            </form>
+        </dialog>
+        <dialog id="delete-confirmation" class="confirmation-dialog" aria-labelledby="delete-confirmation-title">
+            <form id="delete-confirmation-form" method="dialog">
+                <div id="delete-confirmation-title" class="terminal-title">// 确认删除</div>
+                <p id="delete-confirmation-message"></p>
+                <p class="muted">此操作不可恢复。</p>
+                <p id="delete-confirmation-error" class="error-text hidden" role="alert"></p>
+                <div class="confirmation-actions">
+                    <button value="cancel" type="submit">取消</button>
+                    <button id="confirm-delete-button" value="confirm" type="submit" class="danger">确认删除</button>
+                </div>
+            </form>
+        </dialog>
+        <dialog id="create-source-dialog" class="confirmation-dialog" aria-labelledby="create-source-title">
+            <form id="create-source-form" method="dialog">
+                <div id="create-source-title" class="terminal-title">// 新建世界</div>
+                <label class="dialog-field">名称<input id="create-source-name" type="text" maxlength="80" required></label>
+                <p id="create-source-error" class="error-text hidden" role="alert"></p>
+                <div class="confirmation-actions"><button value="cancel" type="submit">取消</button><button id="create-source-submit" value="create" type="submit">创建</button></div>
+            </form>
+        </dialog>
+        <dialog id="create-entity-dialog" class="confirmation-dialog" aria-labelledby="create-entity-title">
+            <form id="create-entity-form" method="dialog">
+                <div id="create-entity-title" class="terminal-title">// 新建实体</div>
+                <label class="dialog-field">名称<input id="create-entity-name" type="text" maxlength="80" required></label>
+                <label class="dialog-field">类型<select id="create-entity-type" required>
+                    <option value="character">角色</option><option value="location">地点</option>
+                    <option value="event">事件</option><option value="item">物品</option>
+                    <option value="organization">组织</option><option value="rule">规则</option>
+                    <option value="player_trait">玩家特质</option>
+                </select></label>
+                <p id="create-entity-error" class="error-text hidden" role="alert"></p>
+                <div class="confirmation-actions"><button value="cancel" type="submit">取消</button><button id="create-entity-submit" value="create" type="submit">创建</button></div>
+            </form>
+        </dialog>
+        <dialog id="create-save-entity-dialog" class="confirmation-dialog" aria-labelledby="create-save-entity-title">
+            <form id="create-save-entity-form" method="dialog">
+                <div id="create-save-entity-title" class="terminal-title">// 在当前存档的世界快照中新建实体</div>
+                <label class="dialog-field">名称<input id="create-save-entity-name" type="text" maxlength="80" required></label>
+                <label class="dialog-field">类型<select id="create-save-entity-type" required>
+                    <option value="character">角色</option><option value="location">地点</option>
+                    <option value="event">事件</option><option value="item">物品</option>
+                    <option value="organization">组织</option><option value="rule">规则</option>
+                    <option value="player_trait">玩家特质</option>
+                </select></label>
+                <p id="create-save-entity-error" class="error-text hidden" role="alert"></p>
+                <div class="confirmation-actions"><button value="cancel" type="submit">取消</button><button id="create-save-entity-submit" value="create" type="submit">创建</button></div>
+            </form>
+        </dialog>
+        <dialog id="create-save-dialog" class="confirmation-dialog adventure-dialog" aria-labelledby="create-save-title">
+            <form id="create-save-form" method="dialog">
+                <div id="create-save-title" class="terminal-title">// 开始新冒险</div>
+                <p id="create-save-world" class="muted"></p>
+                <label class="dialog-field">
+                    存档名称
+                    <input id="create-save-name" name="name" type="text" maxlength="80" required>
+                </label>
+                <div id="mod-selection-step" class="dialog-step">
+                    <div class="dialog-field">
+                        <span>选择模组</span>
+                        <div id="mod-list" class="mod-list" aria-live="polite"></div>
+                        <nav id="mod-pagination" class="save-pagination hidden" aria-label="模组分页">
+                            <button id="previous-mod-page" type="button">[ 上一页 ]</button>
+                            <span id="mod-page-status" class="muted"></span>
+                            <button id="next-mod-page" type="button">[ 下一页 ]</button>
+                        </nav>
+                        <p id="selected-mods" class="muted"></p>
+                    </div>
+                </div>
+                <div id="scenario-selection-step" class="dialog-step hidden">
+                    <div class="dialog-field">
+                    <span>选择开局</span>
+                    <div id="scenario-list" class="scenario-list" aria-live="polite"></div>
+                    <nav id="scenario-pagination" class="save-pagination hidden" aria-label="开局分页">
+                        <button id="previous-scenario-page" type="button">[ 上一页 ]</button>
+                        <span id="scenario-page-status" class="muted"></span>
+                        <button id="next-scenario-page" type="button">[ 下一页 ]</button>
+                    </nav>
+                    <p id="selected-scenario" class="muted"></p>
+                    </div>
+                    <fieldset class="adventure-options">
+                        <legend>参与模式</legend>
+                        <label><input type="radio" name="play_mode" value="roleplay" checked> 角色扮演 · 玩家存在于故事中</label>
+                        <label><input type="radio" name="play_mode" value="director"> 导演 · 玩家不作为故事角色</label>
+                    </fieldset>
+                    <fieldset class="adventure-options">
+                        <legend>叙事人称</legend>
+                        <label><input type="radio" name="narrative_person" value="first"> 第一人称</label>
+                        <label><input type="radio" name="narrative_person" value="second" checked> 第二人称</label>
+                        <label><input type="radio" name="narrative_person" value="third"> 第三人称</label>
+                    </fieldset>
+                    <fieldset class="adventure-options">
+                        <legend>叙事语言</legend>
+                        <label><input type="radio" name="language" value="zh" checked> 中文</label>
+                        <label><input type="radio" name="language" value="ja"> 日语</label>
+                        <label><input type="radio" name="language" value="en"> 英语</label>
+                    </fieldset>
+                    <label class="dialog-field" for="create-save-requirements">其他要求（可选）
+                        <textarea id="create-save-requirements" maxlength="4000" rows="4" placeholder="例如：导演模式下第一人称由谁叙述"></textarea>
+                    </label>
+                </div>
+                <p id="create-save-error" class="error-text hidden" role="alert"></p>
+                <div id="mod-selection-actions" class="confirmation-actions">
+                    <button value="cancel" type="submit">取消</button>
+                    <button id="next-adventure-step" type="button">下一步</button>
+                </div>
+                <div id="scenario-selection-actions" class="confirmation-actions hidden">
+                    <button id="previous-adventure-step" type="button">返回</button>
+                    <button value="cancel" type="submit">取消</button>
+                    <button id="create-save-button" value="create" type="submit">开始冒险</button>
+                </div>
+            </form>
+        </dialog>
+    </div>
+    <script src="/static/app.js?v={{ static_version }}" defer></script>
+</body>
+</html>
