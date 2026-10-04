@@ -5,7 +5,8 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StrictBool, model_validator
 
 from .content import character_snapshot_path, content_name, entity_aliases, entity_snapshot_path, entity_type, location_snapshot_path, style_path
-from .gemini_thinking import GeminiThinkingLevel, validate_gemini_thinking_level
+from .gemini_thinking import GeminiThinkingLevel
+from .thinking import DeepSeekThinkingLevel, ThinkingLevel, validate_thinking_level
 
 
 ProviderName = Literal["openai_compatible", "deepseek", "google_gemini", "anthropic", "xai"]
@@ -31,18 +32,18 @@ class AiPreset(BaseModel):
     provider: ProviderName = "deepseek"
     base_url: str = "https://api.deepseek.com"
     api_key: str = ""
-    model: str = "deepseek-chat"
+    model: str = "deepseek-flash"
     xai_protocol: XaiProtocol = "responses"
     openai_protocol: OpenAiProtocol = "chat_completions"
     timeout_seconds: int = Field(default=120, ge=5, le=600)
     temperature: float = Field(default=1.0, ge=0, le=2)
     top_p: float = Field(default=1.0, gt=0, le=1)
     max_tokens: int = Field(default=65_536, ge=1, le=1_048_576)
-    thinking_level: GeminiThinkingLevel | None = None
+    thinking_level: ThinkingLevel | None = None
 
     @model_validator(mode="after")
     def validate_thinking_level(self) -> AiPreset:
-        validate_gemini_thinking_level(self.provider, self.model, self.thinking_level)
+        validate_thinking_level(self.provider, self.model, self.thinking_level)
         return self
 
 
@@ -58,7 +59,7 @@ class PublicAiPreset(BaseModel):
     temperature: float
     top_p: float
     max_tokens: int
-    thinking_level: GeminiThinkingLevel | None
+    thinking_level: ThinkingLevel | None
     has_api_key: bool
     masked_api_key: str
 
@@ -77,11 +78,11 @@ class PresetWrite(BaseModel):
     temperature: float = Field(default=1.0, ge=0, le=2)
     top_p: float = Field(default=1.0, gt=0, le=1)
     max_tokens: int = Field(default=65_536, ge=1, le=1_048_576)
-    thinking_level: GeminiThinkingLevel | None = None
+    thinking_level: ThinkingLevel | None = None
 
     @model_validator(mode="after")
     def validate_thinking_level(self) -> PresetWrite:
-        validate_gemini_thinking_level(self.provider, self.model, self.thinking_level)
+        validate_thinking_level(self.provider, self.model, self.thinking_level)
         return self
 
 
@@ -116,6 +117,7 @@ class PublicPresetCollection(BaseModel):
     fallback_preset_id: str | None
     presets: list[PublicAiPreset]
     gemini_thinking_levels: dict[str, list[GeminiThinkingLevel]]
+    deepseek_thinking_levels: dict[str, list[DeepSeekThinkingLevel]]
 
 
 class PresetDuplicate(BaseModel):

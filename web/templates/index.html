@@ -9,7 +9,7 @@
 <body>
     <div class="shell">
         <header class="topbar">
-            <div class="brand"><span class="prompt">&gt;</span> RPERA <span class="version">0.1.0</span></div>
+            <div class="brand"><span class="prompt">&gt;</span> RPERA <span class="version">1.0.0</span></div>
             <nav class="view-switch" aria-label="视图切换">
                 <button id="adventure-button" class="switch active" type="button">[ 冒险 ]</button>
                 <button id="foreground-button" class="switch hidden" type="button">[ 前台 ]</button>
@@ -162,6 +162,10 @@
                             <span id="creation-source-label">世界列表</span>
                             <button id="new-source-button" type="button">+ 新建</button>
                         </div>
+                        <div class="creation-actions">
+                            <button id="import-source-button" type="button">导入 ZIP</button>
+                            <input id="import-source-file" class="hidden" type="file" accept=".zip,application/zip" aria-label="选择世界或模组 ZIP">
+                        </div>
                         <div id="creation-source-list" class="creation-source-list" aria-live="polite"></div>
                     </aside>
                     <section class="creation-detail">
@@ -172,7 +176,10 @@
                                     <strong id="creation-selected-name"></strong>
                                     <span id="creation-selected-path" class="muted"></span>
                                 </div>
-                                <button id="delete-source-button" class="danger" type="button">删除来源</button>
+                                <div class="creation-actions">
+                                    <button id="export-source-button" type="button" title="导出已保存的简介、场景和实体；未保存的编辑不会包含在内">导出 ZIP</button>
+                                    <button id="delete-source-button" class="danger" type="button">删除来源</button>
+                                </div>
                             </header>
                             <nav class="creation-detail-tabs" aria-label="来源编辑分类">
                                 <button class="creation-detail-switch active" type="button" data-creation-section="basic" aria-pressed="true">[ 基本信息 ]</button>
@@ -332,10 +339,10 @@
                                     <option value="">尚未拉取模型</option>
                                 </select>
                             </label>
-                            <label id="gemini-thinking-field" class="hidden">
-                                Gemini 思考强度
-                                <select id="gemini-thinking-level" name="thinking_level"></select>
-                                <span class="muted">按所选 Gemini 3 型号显示允许档位；自动模式不发送思考强度参数。</span>
+                            <label id="thinking-field" class="hidden">
+                                思考强度
+                                <select id="thinking-level" name="thinking_level"></select>
+                                <span id="thinking-hint" class="muted"></span>
                             </label>
                             <label>
                                 Temperature

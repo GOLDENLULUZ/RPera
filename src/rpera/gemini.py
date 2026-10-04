@@ -5,9 +5,10 @@ import uuid
 from typing import Any
 
 from .message_compat import content_blocks, image_data_url, system_messages_as_user
-from .gemini_thinking import GeminiThinkingLevel, validate_gemini_thinking_level
+from .gemini_thinking import validate_gemini_thinking_level
 from .model_errors import CONTENT_BLOCK_REASONS, ModelFallbackError, is_content_block_error
 from .models import ModelResult, ToolCall
+from .thinking import ThinkingLevel
 
 
 SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
@@ -22,7 +23,7 @@ def request_payload(
     top_p: float,
     max_tokens: int,
     model: str = "",
-    thinking_level: GeminiThinkingLevel | None = None,
+    thinking_level: ThinkingLevel | None = None,
 ) -> dict[str, Any]:
     validate_gemini_thinking_level("google_gemini", model, thinking_level)
     payload: dict[str, Any] = {

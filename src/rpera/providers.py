@@ -220,6 +220,8 @@ class BoundModelClient:
             "top_p": preset.top_p,
             "max_tokens": preset.max_tokens,
         }
+        if preset.provider == "deepseek" and preset.thinking_level is not None:
+            payload["reasoning_effort"] = preset.thinking_level
         if tools:
             payload["tools"] = tools
             if preset.provider == "xai":
@@ -519,6 +521,8 @@ class BoundModelClient:
 
     async def test_connection(self) -> ModelResult:
         needs_reasoning_room = self.preset.provider in {"google_gemini", "anthropic"} or (
+            self.preset.provider == "deepseek" and self.preset.thinking_level != "none"
+        ) or (
             self.preset.provider == "xai" and self.preset.xai_protocol == "responses"
         ) or (
             self.preset.provider == "openai_compatible" and self.preset.openai_protocol == "responses"

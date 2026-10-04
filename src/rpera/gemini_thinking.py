@@ -21,7 +21,7 @@ def supported_gemini_thinking_levels() -> dict[str, list[GeminiThinkingLevel]]:
     return {model: list(levels) for model, levels in _SUPPORTED_LEVELS.items()}
 
 
-def validate_gemini_thinking_level(provider: str, model: str, level: GeminiThinkingLevel | None) -> None:
+def validate_gemini_thinking_level(provider: str, model: str, level: str | None) -> None:
     if level is None:
         return
     if provider != "google_gemini":

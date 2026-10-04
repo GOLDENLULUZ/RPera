@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import Response
+from starlette.concurrency import run_in_threadpool
+
+from .content_archive import ARCHIVE_UPLOAD_LIMIT
 
 from .content_store import (
     ContentConflictError,
@@ -90,6 +95,24 @@ def _source_router(store: ContentStore, kind: SourceKind, plural: str) -> APIRou
     @router.post("", status_code=201)
     def create_source(payload: ContentSourceCreate):
         return _execute(lambda: store.create_source(kind, payload))
+
+    @router.post("/import", status_code=201)
+    async def import_source(request: Request):
+        data = bytearray()
+        async for chunk in request.stream():
+            if len(data) + len(chunk) > ARCHIVE_UPLOAD_LIMIT:
+                raise HTTPException(status_code=413, detail="压缩包不能超过 16 MiB")
+            data.extend(chunk)
+        return await run_in_threadpool(_execute, lambda: store.import_source(kind, bytes(data)))
+
+    @router.get("/{source_name}/export")
+    def export_source(source_name: str):
+        name, data = _execute(lambda: store.export_source(kind, source_name))
+        filename = quote(f"{name}-{'world' if kind == 'world' else 'mod'}.zip", safe="")
+        return Response(data, media_type="application/zip", headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+            "Cache-Control": "no-store",
+        })
 
     @router.get("/{source_name}")
     def get_source(source_name: str):

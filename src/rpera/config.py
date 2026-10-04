@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 from .agents import AGENTS, agent_names
 from .gemini_thinking import supported_gemini_thinking_levels
+from .thinking import supported_deepseek_thinking_levels
 from .models import (
     AgentPresetSettingsWrite,
     AiFallbackSettingsWrite,
@@ -38,16 +39,7 @@ class PresetStore:
 
     def public(self) -> PublicPresetCollection:
         with self._write_lock:
-            collection = self._load_unlocked()
-            return PublicPresetCollection(
-                main_preset_id=collection.main_preset_id,
-                agent_preset_overrides=collection.agent_preset_overrides,
-                agent_streaming=collection.agent_streaming,
-                fallback_enabled=collection.fallback_enabled,
-                fallback_preset_id=collection.fallback_preset_id,
-                presets=[self._public_preset(preset) for preset in collection.presets],
-                gemini_thinking_levels=supported_gemini_thinking_levels(),
-            )
+            return self._public_collection(self._load_unlocked())
 
     def resolve(self, agent_names: tuple[str, ...]) -> dict[str, AiPreset]:
         with self._write_lock:
@@ -268,6 +260,7 @@ class PresetStore:
             fallback_preset_id=collection.fallback_preset_id,
             presets=[cls._public_preset(preset) for preset in collection.presets],
             gemini_thinking_levels=supported_gemini_thinking_levels(),
+            deepseek_thinking_levels=supported_deepseek_thinking_levels(),
         )
 
     @staticmethod

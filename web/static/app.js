@@ -237,9 +237,9 @@ const elements = {
     createEntityForm: $("#create-entity-form"),
 };
 
-async function api(path, options = {}) {
+async function api(path, options = {}, responseType = "json") {
     const headers = { ...(options.headers || {}) };
-    if (!(options.body instanceof FormData)) headers["Content-Type"] = "application/json";
+    if (!(options.body instanceof FormData) && !(options.body instanceof Blob)) headers["Content-Type"] = "application/json";
     const response = await fetch(path, {
         ...options,
         headers,
@@ -251,7 +251,7 @@ async function api(path, options = {}) {
             : body.detail;
         throw new Error(detail || `HTTP ${response.status}`);
     }
-    return response.json();
+    return responseType === "blob" ? response.blob() : response.json();
 }
 
 function rememberWorkspaceScroll() {
@@ -1785,7 +1785,7 @@ function fillPresetForm(preset) {
     resetModelOptions();
     setPresetStatus("");
     updateProviderFields();
-    updateGeminiThinkingFields(preset.thinking_level);
+    updateThinkingFields(preset.thinking_level);
 }
 
 function startNewPreset() {
@@ -1796,7 +1796,7 @@ function startNewPreset() {
         name: "新 AI Preset",
         provider: "deepseek",
         base_url: "https://api.deepseek.com",
-        model: "deepseek-chat",
+        model: "deepseek-flash",
         xai_protocol: "responses",
         openai_protocol: "chat_completions",
         timeout_seconds: 120,
@@ -1827,7 +1827,7 @@ function presetPayload() {
         temperature: Number($("#temperature").value),
         top_p: Number($("#top-p").value),
         max_tokens: Number($("#max-tokens").value),
-        thinking_level: $("#gemini-thinking-level").value || null,
+        thinking_level: $("#thinking-level").value || null,
     };
 }
 
@@ -1975,7 +1975,7 @@ function updateProviderFields(applyDefaults = false) {
     $("#openai-protocol-field").classList.toggle("hidden", $("#provider").value !== "openai_compatible");
     if (applyDefaults) {
         const defaults = {
-            deepseek: ["https://api.deepseek.com", "deepseek-chat"],
+            deepseek: ["https://api.deepseek.com", "deepseek-flash"],
             openai_compatible: ["", ""],
             google_gemini: ["https://generativelanguage.googleapis.com/v1beta", "gemini-flash-latest"],
             anthropic: ["https://api.anthropic.com/v1", "claude-sonnet-4-6"],
@@ -1986,20 +1986,26 @@ function updateProviderFields(applyDefaults = false) {
             $("#model").value = defaults[1];
         }
     }
-    updateGeminiThinkingFields(undefined, applyDefaults);
+    updateThinkingFields(applyDefaults ? null : undefined);
 }
 
-function updateGeminiThinkingFields(preferred = $("#gemini-thinking-level").value, notify = false) {
-    const model = $("#model").value.trim().replace(/^models\//, "");
-    const levels = $("#provider").value === "google_gemini" ? state.presets?.gemini_thinking_levels?.[model] : null;
-    const select = $("#gemini-thinking-level");
+function updateThinkingFields(preferred = $("#thinking-level").value, notify = false) {
+    const provider = $("#provider").value;
+    const model = $("#model").value.trim();
+    const levels = provider === "google_gemini"
+        ? state.presets?.gemini_thinking_levels?.[model.replace(/^models\//, "")]
+        : provider === "deepseek" ? state.presets?.deepseek_thinking_levels?.[model] : null;
+    const select = $("#thinking-level");
     select.replaceChildren(new Option("自动（模型默认）", ""));
     for (const level of levels || []) {
-        const labels = {minimal: "最低", low: "低", medium: "中", high: "高"};
+        const labels = {none: "关闭思考", minimal: "最低", low: "低", medium: "中", high: "高", max: "最大"};
         select.add(new Option(labels[level], level));
     }
     select.value = levels?.includes(preferred) ? preferred : "";
-    $("#gemini-thinking-field").classList.toggle("hidden", !levels);
+    $("#thinking-field").classList.toggle("hidden", !levels);
+    $("#thinking-hint").textContent = provider === "deepseek"
+        ? "自动不发送思考参数，遵循模型默认；当前型号默认高。思考模式下 Temperature 不生效，Top P 有效范围为 0.95–1。"
+        : "按所选 Gemini 3 型号显示允许档位；自动模式不发送思考强度参数。";
     if (notify && preferred && !select.value) {
         setPresetStatus("当前模型不支持原思考强度，已改为自动；请保存 Preset");
         return true;
@@ -2354,6 +2360,7 @@ function adjustSelectedSourceCounts(scenarioDelta, entityDelta) {
 function renderCreationSourceList() {
     elements.creationSourceList.replaceChildren();
     const label = creationKindLabel();
+    $("#import-source-button").classList.toggle("hidden", isStyleCreation());
     $("#creation-source-label").textContent = `${label}列表`;
     $("#creation-description").textContent = isStyleCreation()
         ? "文风是全局实时资源；已有存档的后续新回合也会读取当前版本。"
@@ -2553,6 +2560,45 @@ async function toggleCurrentStyleEnabled() {
         renderStyleEnabledState();
         setCreationStatus(updated.enabled ? "文风已启用" : "文风已禁用");
     }, source.enabled ? "正在禁用文风……" : "正在启用文风……");
+}
+
+async function importSource() {
+    const input = $("#import-source-file");
+    const file = input.files[0];
+    input.value = "";
+    if (!file || state.creationBusy || isStyleCreation()) return;
+    if (file.size > 16 * 1024 * 1024) {
+        setCreationStatus("压缩包不能超过 16 MiB", true);
+        return;
+    }
+    const kind = state.creationKind;
+    await runCreation(async () => {
+        const source = await api(`${fixedCreationBase(kind)}/import`, {
+            method: "POST", headers: { "Content-Type": "application/zip" }, body: file,
+        });
+        state.creationSection = "basic";
+        state.selectedEntityName = null;
+        await loadCreationSources(source.name, kind);
+        setCreationStatus(`${creationKindLabel(kind)}已导入：${source.name}`);
+    }, "正在校验并导入 ZIP……");
+}
+
+async function exportSource() {
+    const source = state.selectedCreationSource;
+    if (!source || isStyleCreation()) return;
+    const kind = state.creationKind;
+    await runCreation(async () => {
+        const blob = await api(`${fixedCreationBase(kind, source.name)}/export`, {}, "blob");
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `${source.name}-${kind === "worlds" ? "world" : "mod"}.zip`;
+        document.body.append(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        setCreationStatus(`已导出已保存内容：${source.name}（不含未保存的编辑）`);
+    }, "正在打包已保存内容……");
 }
 
 function openCreateSourceDialog() {
@@ -3236,7 +3282,7 @@ elements.nextScenarioPage.addEventListener("click", () => {
 elements.presetForm.addEventListener("input", (event) => {
     state.presetDirty = true;
     if (["provider", "base-url", "api-key"].includes(event.target.id)) resetModelOptions();
-    if (event.target.id === "model") updateGeminiThinkingFields(undefined, true);
+    if (event.target.id === "model") updateThinkingFields(undefined, true);
 });
 $("#provider").addEventListener("change", () => {
     state.presetDirty = true;
@@ -3249,7 +3295,7 @@ $("#load-models-button").addEventListener("click", loadModels);
 $("#model-select").addEventListener("change", (event) => {
     if (!event.target.value) return;
     $("#model").value = event.target.value;
-    const levelReset = updateGeminiThinkingFields(undefined, true);
+    const levelReset = updateThinkingFields(undefined, true);
     state.presetDirty = true;
     if (!levelReset) setPresetStatus(`已选择模型 ${event.target.value}，请保存 Preset`);
 });
@@ -3293,6 +3339,9 @@ elements.sourceContentForm.addEventListener("submit", saveSourceContent);
 elements.styleRenameForm.addEventListener("submit", renameSource);
 elements.styleContentForm.addEventListener("submit", saveSourceContent);
 $("#new-source-button").addEventListener("click", openCreateSourceDialog);
+$("#import-source-button").addEventListener("click", () => $("#import-source-file").click());
+$("#import-source-file").addEventListener("change", importSource);
+$("#export-source-button").addEventListener("click", exportSource);
 $("#delete-source-button").addEventListener("click", deleteCurrentSource);
 $("#delete-style-button").addEventListener("click", deleteCurrentSource);
 elements.toggleStyleEnabledButton.addEventListener("click", toggleCurrentStyleEnabled);

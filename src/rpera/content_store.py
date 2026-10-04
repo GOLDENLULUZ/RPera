@@ -4,10 +4,15 @@ import os
 import shutil
 import stat
 import uuid
+import zlib
+from io import BytesIO
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
+
+from .content_archive import ARCHIVE_CONTENT_LIMIT, ARCHIVE_ENTRY_LIMIT, ARCHIVE_UPLOAD_LIMIT, archive_path, validate_member
 
 from .content import (
     ENTITY_DOCUMENT_LIMIT,
@@ -143,6 +148,126 @@ class ContentStore:
             path = self._source_relative_path(kind, source.name)
             self._remove_active(source)
             return {"name": source.name, "path": path, "deleted": True}
+
+    def export_source(self, kind: SourceKind, name: str) -> tuple[str, bytes]:
+        with self.lock:
+            scan = self._scan_source(self._source_directory(kind, name))
+            prefix = self._source_relative_path(kind, scan.path.name)
+            output = BytesIO()
+            total = 0
+            entries = 1
+            with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
+                archive.writestr(f"{prefix}/", b"")
+                for path in sorted(scan.path.rglob("*")):
+                    relative = path.relative_to(scan.path).as_posix()
+                    if (
+                        (path.parent == scan.path and self._is_internal_temporary(path, target_name="description.md"))
+                        or (path.parent == scan.path / "scenarios" and self._is_internal_temporary(path, target_suffix=".md"))
+                        or (path.parent.parent.parent == scan.path / "entities" and self._is_internal_temporary(path, target_name="ENTITY.md"))
+                    ):
+                        continue
+                    directory = stat.S_ISDIR(path.lstat().st_mode)
+                    member = f"{prefix}/{relative}" + ("/" if directory else "")
+                    try:
+                        archive_path(member, directory=directory)
+                    except ValueError as error:
+                        raise UnsafeContentError(str(error)) from error
+                    entries += 1
+                    if entries > ARCHIVE_ENTRY_LIMIT:
+                        raise UnsafeContentError("压缩包条目数量超过限制")
+                    if directory:
+                        self._require_directory(path, "内容目录")
+                        archive.writestr(member, b"")
+                    else:
+                        total += self._require_regular(path, "内容文件").st_size
+                        if total > ARCHIVE_CONTENT_LIMIT:
+                            raise UnsafeContentError("导出内容超过大小限制")
+                        archive.write(path, member)
+            data = output.getvalue()
+            if len(data) > ARCHIVE_UPLOAD_LIMIT:
+                raise UnsafeContentError("导出压缩包超过大小限制")
+            return scan.path.name, data
+
+    def import_source(self, kind: SourceKind, data: bytes) -> dict[str, Any]:
+        if len(data) > ARCHIVE_UPLOAD_LIMIT:
+            raise UnsafeContentError("压缩包不能超过 16 MiB")
+        with self.lock:
+            self._ensure_directory(self.data_dir, "数据根目录")
+            self._ensure_directory(self.staging_dir, "内容 staging 目录")
+            staging = self.staging_dir / f"import-{uuid.uuid4()}"
+            try:
+                with ZipFile(BytesIO(data)) as archive:
+                    members = archive.infolist()
+                    if not members or len(members) > ARCHIVE_ENTRY_LIMIT:
+                        raise ValueError("压缩包为空或条目数量超过限制")
+                    roots: set[tuple[str, str]] = set()
+                    seen: set[tuple[str, ...]] = set()
+                    canonical: dict[tuple[str, ...], tuple[str, ...]] = {}
+                    checked = []
+                    total = 0
+                    for info in members:
+                        parts = validate_member(info)
+                        if parts[0] != ("worlds" if kind == "world" else "mods"):
+                            raise ValueError("压缩包类型与当前导入列表不一致")
+                        key = tuple(part.casefold() for part in parts)
+                        if key in seen:
+                            raise ValueError(f"压缩包路径重复：{info.filename}")
+                        seen.add(key)
+                        for length in range(1, len(parts) + 1):
+                            prefix = parts[:length]
+                            prefix_key = key[:length]
+                            if canonical.setdefault(prefix_key, prefix) != prefix:
+                                raise ValueError(f"压缩包路径大小写冲突：{info.filename}")
+                        if len(parts) >= 2:
+                            roots.add((parts[0], parts[1]))
+                        total += info.file_size
+                        if total > ARCHIVE_CONTENT_LIMIT:
+                            raise ValueError("解压内容不能超过 64 MiB")
+                        checked.append((info, parts))
+                    if len(roots) != 1:
+                        raise ValueError("压缩包必须只包含一个世界或模组")
+                    original_name = next(iter(roots))[1]
+                    staging.mkdir()
+                    total = 0
+                    for info, parts in checked:
+                        if len(parts) <= 2:
+                            continue
+                        target = staging.joinpath(*parts[2:])
+                        if info.is_dir():
+                            target.mkdir(parents=True, exist_ok=True)
+                            continue
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with archive.open(info) as source, target.open("xb") as destination:
+                            while chunk := source.read(64 * 1024):
+                                total += len(chunk)
+                                if total > ARCHIVE_CONTENT_LIMIT:
+                                    raise ValueError("解压内容不能超过 64 MiB")
+                                destination.write(chunk)
+                            destination.flush()
+                            os.fsync(destination.fileno())
+                    self._scan_source(staging)
+                    active = self._active_dir(kind)
+                    self._ensure_directory(active, "内容库")
+                    occupied = {content_name_key(path.name) for path in self._source_directories(kind)}
+                    name = original_name
+                    number = 1
+                    while content_name_key(name) in occupied:
+                        suffix = f"({number})"
+                        base = original_name
+                        while len(base + suffix) > 80 or len((base + suffix).encode("utf-8")) > 240:
+                            base = base[:-1]
+                        name = base.rstrip(" .") + suffix
+                        number += 1
+                    for directory in sorted((path for path in staging.rglob("*") if path.is_dir()), key=lambda path: len(path.parts), reverse=True):
+                        self._sync_directory(directory)
+                    self._sync_directory(staging)
+                    target = active / name
+                    self._rename(staging, target)
+                    return self._source_summary(kind, self._scan_source(target))
+            except (ValueError, BadZipFile, NotImplementedError, RuntimeError, EOFError, zlib.error) as error:
+                raise UnsafeContentError(f"无法导入压缩包：{error}") from error
+            finally:
+                self._cleanup_hidden(staging)
 
     def list_styles(self) -> list[StyleSummary]:
         with self.lock:
