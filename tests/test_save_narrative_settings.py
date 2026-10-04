@@ -35,7 +35,7 @@ class SettingsStoryClient:
                 call = ToolCall(id="check", name="task", arguments={"agent": "consistency_checker", "task": "检查故事"})
             else:
                 call = ToolCall(id="publish", name="narrative_publish", arguments={"path": "narrative.md"})
-        elif system_prompt.startswith("你是 RPera 的叙事 Agent。"):
+        elif "你是 RPera 的叙事 Agent。" in system_prompt:
             if not completed:
                 call = ToolCall(id="write", name="file_write", arguments={"path": "narrative.md", "content": "故事已写。"})
         elif system_prompt.startswith("你是 RPera 的一致性检查 Agent。"):

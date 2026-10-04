@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2.10,<3",
     "python-multipart>=0.0.20,<1",
     "pyyaml>=6.0,<7",
+    "tiktoken>=0.12,<1",
     "uvicorn[standard]>=0.32,<1",
 ]
 

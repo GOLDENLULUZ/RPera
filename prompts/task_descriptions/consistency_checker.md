@@ -1,1 +1,1 @@
-在 narrator 产出或修订 narrative.md 后，需要检查连续性和叙事目标执行情况时使用。Agent 会读取当前真实草稿，结合 story 中最后一个 turn 的玩家输入和最近一个 has_ai_output 为 true 的历史 turn 的 narrative，只返回范围内的具体修改意见，不修改或发布正文，也不审核一般内容质量。收到意见后，你应当使用原 narrator task_id 要求修改；修改后可使用原 consistency_checker task_id 复查，也可直接发布。
+在 narrator 产出或修订 narrative.md 后，需要检查连续性和叙事目标执行情况时使用。Agent 会读取当前真实草稿，结合 story 中最后一个 turn 的玩家输入和最近一个 has_ai_output 为 true 的历史 turn 的 narrative，只返回范围内的具体修改意见，不修改或发布正文，也不审核一般内容质量。启用叙事 Token 计数能力时还会检查完整草稿并报告实际数量、上限和超出量。收到意见后，你应当使用原 narrator task_id 要求修改；修改后可使用原 consistency_checker task_id 复查，也可直接发布。

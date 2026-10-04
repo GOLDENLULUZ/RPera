@@ -7,7 +7,7 @@ from .models import RuntimeEvent
 
 TURN_EVENTS = frozenset({"turn.started", "turn.resumed", "turn.completed", "turn.failed", "turn.interrupted"})
 TOOL_EVENTS = frozenset({"tool.started", "tool.completed", "tool.failed"})
-TRACE_EVENT_TYPES = (*TURN_EVENTS, *TOOL_EVENTS, "task.created", "model.response", "agent.fixed_response")
+TRACE_EVENT_TYPES = (*TURN_EVENTS, *TOOL_EVENTS, "task.created", "model.response", "model.fallback", "agent.fixed_response")
 
 
 def project_trace_event(event: RuntimeEvent) -> RuntimeEvent | None:
@@ -21,6 +21,8 @@ def project_trace_event(event: RuntimeEvent) -> RuntimeEvent | None:
         if payload.get("tool_calls") or not isinstance(content, str) or not content.strip():
             return None
         projected = _only(payload, "agent", "content", "duration_ms")
+    elif event.type == "model.fallback":
+        projected = _only(payload, "agent", "reason", "error", "primary_model", "fallback_model")
     elif event.type == "agent.fixed_response":
         projected = _only(payload, "agent", "result")
     elif event.type == "task.created":

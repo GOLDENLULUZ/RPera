@@ -15,7 +15,7 @@ _WINDOWS_RESERVED = frozenset(
     | {f"COM{suffix}" for suffix in (*range(1, 10), "¹", "²", "³")}
     | {f"LPT{suffix}" for suffix in (*range(1, 10), "¹", "²", "³")}
 )
-ENTITY_TYPES = ("character", "location", "event", "item", "organization", "rule", "player_trait")
+ENTITY_TYPES = ("character", "location", "event", "item", "organization", "rule", "player_trait", "goal")
 SCENARIO_DOCUMENT_LIMIT = 65_000
 ENTITY_DOCUMENT_LIMIT = 170_000
 STYLE_DOCUMENT_LIMIT = 170_000

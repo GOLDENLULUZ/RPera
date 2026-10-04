@@ -11,6 +11,7 @@ from .models import SaveNarrativeSettings
 
 
 SAVE_NARRATIVE_SETTINGS_PLACEHOLDER = "{save_narrative_settings}"
+NARRATIVE_TOKEN_LIMIT_PLACEHOLDER = "{max_tokens}"
 
 
 def render_save_narrative_settings(template: str, settings: SaveNarrativeSettings) -> str:
@@ -61,6 +62,7 @@ class PromptStore:
         self,
         enabled_agents: frozenset[str],
         prefill_agents: frozenset[str] = frozenset(),
+        fixed_response_agents: frozenset[str] = frozenset(),
     ) -> PromptSnapshot:
         prompts: dict[str, str] = {}
         task_descriptions: dict[str, str] = {}
@@ -78,14 +80,16 @@ class PromptStore:
                 if len(description) > 4_000:
                     raise PromptConfigurationError(f"Agent task 描述不能超过 4000 字符：{description_path}")
                 task_descriptions[spec.name] = description
-            if spec.fixed_response_file is not None:
+            if spec.name in fixed_response_agents:
+                if spec.fixed_response_file is None:
+                    raise PromptConfigurationError(f"Agent 不支持固定响应：{spec.name}")
                 response_path = self.fixed_response_root / spec.fixed_response_file
                 response = self._read_text(response_path, "Agent 固定响应")
                 try:
                     fixed_responses[spec.name] = ComplianceReviewResult.model_validate_json(response)
                 except ValidationError as error:
                     raise PromptConfigurationError(f"Agent 固定响应格式无效：{response_path}：{error}") from error
-            if spec.name in prefill_agents and spec.fixed_response_file is None:
+            if spec.name in prefill_agents and spec.name not in fixed_response_agents:
                 prefill_path = self.prefill_root / f"{spec.name}.md"
                 prefills[spec.name] = self._read_text(prefill_path, "Agent 尾部续写")
 
@@ -102,6 +106,10 @@ class PromptStore:
             description = self._read_text(description_path, "Capability 描述")
             if len(description) > 4_000:
                 raise PromptConfigurationError(f"Capability 描述不能超过 4000 字符：{description_path}")
+            if name == "narrative_token_count" and description.count(NARRATIVE_TOKEN_LIMIT_PLACEHOLDER) != 1:
+                raise PromptConfigurationError(
+                    f"叙事 Token 计数 Capability 描述必须且只能包含一个 {NARRATIVE_TOKEN_LIMIT_PLACEHOLDER}"
+                )
             capability_descriptions[name] = description
 
         coordinator = prompts[self.agents.main().name]

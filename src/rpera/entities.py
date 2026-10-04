@@ -109,7 +109,7 @@ class EntityStore:
         documents: list[EntityDocument] = []
         for path in paths:
             entry = indexed.get(path)
-            if entry is not None and not entry.required:
+            if entry is not None:
                 documents.append(self._document(entry))
         return documents
 

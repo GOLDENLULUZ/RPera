@@ -66,6 +66,8 @@ def utc_now() -> str:
 
 IMAGE_ARTIFACT_MAX_BYTES = 10 * 1024 * 1024
 IMAGE_ARTIFACT_MAX_DIMENSION = 8192
+GOAL_ENTITY_NAME = "目标清单"
+GOAL_ENTITY_PATH = f"entities/goal/{GOAL_ENTITY_NAME}/ENTITY.md"
 IMAGE_MIME_TYPES = {
     "PNG": "image/png",
     "JPEG": "image/jpeg",
@@ -827,6 +829,78 @@ class SaveStore:
 
     def required_entity_documents(self, save_id: str) -> list[dict[str, Any]]:
         return [self._document_dict(document) for document in self._entity_store(save_id).required_documents()]
+
+    def read_goal(self, save_id: str, *, for_edit: bool = False) -> dict[str, Any] | None:
+        with self._save_locks[save_id]:
+            return self._read_goal_unlocked(save_id, for_edit=for_edit)
+
+    def _read_goal_unlocked(self, save_id: str, *, for_edit: bool = False) -> dict[str, Any] | None:
+        store = self._entity_store(save_id)
+        if not any(entry.path == GOAL_ENTITY_PATH for entry in store.entries()):
+            return None
+        document = store.read_exact([GOAL_ENTITY_PATH])[0]
+        result = self._document_dict(document)
+        if for_edit:
+            result["document"] = (store.root / GOAL_ENTITY_PATH).read_text(encoding="utf-8")
+        return result
+
+    def create_goal(self, save_id: str, description: str, profile: dict[str, Any]) -> dict[str, Any]:
+        document = serialize_entity_document(ParsedEntity(
+            content_description(description), [], "world_truth", True,
+            json.dumps(profile, ensure_ascii=False, indent=2, allow_nan=False),
+        ))
+        save_dir = self._state_dir(save_id)
+        with self._save_locks[save_id]:
+            self._assert_entity_name_available(self._entity_store(save_id).entries(), "", GOAL_ENTITY_NAME)
+            entities = save_dir / "world_snapshot" / "entities"
+            self._ensure_real_directory(entities)
+            goals = entities / "goal"
+            self._ensure_real_directory(goals)
+            staging_root = save_dir / ".entity-staging"
+            self._ensure_real_directory(staging_root)
+            staging = staging_root / f"goal-{uuid.uuid4()}"
+            target = goals / GOAL_ENTITY_NAME
+            try:
+                staging.mkdir()
+                self._write_new_file(staging / "ENTITY.md", document.encode("utf-8"))
+                self._sync_directory(staging)
+                if target.exists() or target.is_symlink():
+                    raise ValueError(f"实体名称已存在：{GOAL_ENTITY_NAME}")
+                os.replace(staging, target)
+                self._sync_directory(goals)
+                self._sync_directory(staging_root)
+            finally:
+                if staging.exists() and not staging.is_symlink():
+                    shutil.rmtree(staging, ignore_errors=True)
+            created = self._read_goal_unlocked(save_id, for_edit=True)
+            assert created is not None
+            return created
+
+    def edit_goal(self, save_id: str, old_text: str, new_text: str) -> dict[str, Any]:
+        if not old_text:
+            raise ValueError("old_text 不能为空")
+        with self._save_locks[save_id]:
+            existing = self._read_goal_unlocked(save_id)
+            if existing is None:
+                raise ValueError("目标清单不存在")
+            target = self._state_dir(save_id) / "world_snapshot" / GOAL_ENTITY_PATH
+            current = target.read_text(encoding="utf-8")
+            if current.count(old_text) != 1:
+                raise ValueError("old_text 必须在目标文件中唯一出现一次")
+            updated = current.replace(old_text, new_text, 1)
+            parsed = parse_entity_document(updated)
+            if parsed.visibility != existing["visibility"] or parsed.required != existing["required"]:
+                raise ValueError("goal_edit 不允许修改 visibility 或 required")
+            try:
+                profile = json.loads(parsed.content)
+            except json.JSONDecodeError as error:
+                raise ValueError("目标正文必须是合法 JSON 对象") from error
+            if not isinstance(profile, dict):
+                raise ValueError("目标正文必须是合法 JSON 对象")
+            self._atomic_replace_file(target, updated.encode("utf-8"))
+            edited = self._read_goal_unlocked(save_id, for_edit=True)
+            assert edited is not None
+            return edited
 
     def create_character(
         self,
@@ -1685,21 +1759,13 @@ class SaveStore:
         agent: str,
         task: dict[str, Any],
         task_id: str | None,
-        related_entity_documents: list[dict[str, Any]] | None = None,
+        transfers: list[tuple[str, dict[str, Any], dict[str, Any]]] | None = None,
         available_styles: list[dict[str, Any]] | None = None,
         style_documents: list[dict[str, Any]] | None = None,
-        report_documents: list[dict[str, Any]] | None = None,
     ) -> str:
         session_id = task_id or str(uuid.uuid4())
         now = utc_now()
         initial: dict[str, Any] = {"task": task}
-        if task_id is None and agent == "world_researcher":
-            initial["required_world_entities_instruction"] = "这些是对故事长期必要的信息，因此直接提供给你。"
-            initial["required_world_entities"] = self.required_entity_documents(save_id)
-        if related_entity_documents:
-            if agent not in {"character_designer", "location_designer", "EroticOrNot", "role_player", "style_planner", "narrator"} or task_id is not None:
-                raise ValueError("相关实体正文只能注入新建 character_designer、location_designer、EroticOrNot、role_player、style_planner 或 narrator 会话")
-            initial["related_entity_documents"] = related_entity_documents
         if available_styles is not None:
             if agent != "style_planner" or task_id is not None:
                 raise ValueError("文风清单只能注入新建 style_planner 会话")
@@ -1708,9 +1774,6 @@ class SaveStore:
             if agent != "narrator" or task_id is not None:
                 raise ValueError("文风正文只能注入新建 narrator 会话")
             initial["style_documents"] = style_documents
-        if report_documents:
-            initial["report_documents_instruction"] = "以下 report_documents 是 Runtime 验真的完整报告原文，请结合当前任务直接使用，不要要求主代理重新转述。"
-            initial["report_documents"] = report_documents
         with self.connect(save_id) as db:
             parent = db.execute(
                 "SELECT turn_id FROM sessions WHERE id = ?", (parent_session_id,)
@@ -1738,10 +1801,25 @@ class SaveStore:
                 if child["turn_id"] != turn_id or child["parent_session_id"] != parent_session_id or child["agent"] != agent:
                     raise ValueError("task_id 不属于当前回合、父 Agent 或目标 Agent")
                 continuation: dict[str, Any] = {"task": task, "continuation": True}
-                if report_documents:
-                    continuation["report_documents_instruction"] = initial["report_documents_instruction"]
-                    continuation["report_documents"] = report_documents
                 self._insert_text_message(db, session_id, "user", json.dumps(continuation, ensure_ascii=False), now)
+            for tool_name, tool_input, tool_output in transfers or []:
+                if tool_name not in {"entity_read", "report_read"}:
+                    raise ValueError("未知的读取工具")
+                message_id = str(uuid.uuid4())
+                sequence = int(db.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)).fetchone()[0])
+                db.execute(
+                    "INSERT INTO messages (id, session_id, sequence, role, kind, model, created_at) VALUES (?, ?, ?, 'assistant', 'model', ?, ?)",
+                    (message_id, session_id, sequence, json.dumps({"provider": "runtime", "model": "initial_read"}), now),
+                )
+                part_id = str(uuid.uuid4())
+                db.execute(
+                    """INSERT INTO parts
+                       (id, message_id, session_id, sequence, type, provider_call_id, tool_name, input, state, output, created_at, updated_at)
+                       VALUES (?, ?, ?, 0, 'tool', ?, ?, ?, 'completed', ?, ?, ?)""",
+                    (part_id, message_id, session_id, f"call-{part_id}",
+                     tool_name, json.dumps(tool_input, ensure_ascii=False),
+                     json.dumps(tool_output, ensure_ascii=False), now, now),
+                )
             db.execute(
                 "UPDATE parts SET child_session_id = ?, updated_at = ? WHERE id = ?",
                 (session_id, now, task_part_id),
@@ -1775,6 +1853,7 @@ class SaveStore:
         tool_calls: list[dict[str, Any]],
         rejection: dict[str, Any] | None = None,
         provider_content: dict[str, Any] | None = None,
+        actual_model: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         now = utc_now()
         created: list[dict[str, Any]] = []
@@ -1783,14 +1862,17 @@ class SaveStore:
             if message is None:
                 raise KeyError(f"未知 message：{message_id}")
             session_id = str(message["session_id"])
-            if provider_content is not None:
+            if provider_content is not None or actual_model is not None:
                 try:
                     model = json.loads(message["model"] or "{}")
                 except (json.JSONDecodeError, TypeError):
                     model = {}
                 if not isinstance(model, dict):
                     model = {}
-                model["provider_content"] = provider_content
+                if actual_model is not None:
+                    model = dict(actual_model)
+                if provider_content is not None:
+                    model["provider_content"] = provider_content
                 db.execute(
                     "UPDATE messages SET model = ? WHERE id = ?",
                     (json.dumps(model, ensure_ascii=False), message_id),

@@ -8,12 +8,13 @@ from typing import Any, ParamSpec, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .agents import CharacterChangeReport, LocationChangeReport, StylePlanningReport, WorldResearchReport
+from .agents import CharacterChangeReport, ComplianceReviewResult, LocationChangeReport, ReportRef, StylePlanningReport, TextReport, WorldResearchReport
 from .drawing_providers import NovelAIClient, StableDiffusionWebUIClient
 from .draft_files import DraftFileStore
 from .content_store import ContentStore
-from .models import CharacterPortraitGenerationSettings, CharacterSnapshotPath, ContentName, DrawingPreset, EntityAliases, EntitySnapshotPath, LocationSnapshotPath, NetworkSettings, StylePath
+from .models import CharacterPortraitGenerationSettings, CharacterSnapshotPath, ContentName, DrawingPreset, EntityAliases, EntitySnapshotPath, LocationSnapshotPath, NarrativeTokenCountingSettings, NetworkSettings, StylePath
 from .storage import SaveStore
+from .token_counting import ENCODING_NAME, count_narrative_tokens
 
 
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -38,7 +39,13 @@ class EntitySearchInput(BaseModel):
 class EntityReadInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    paths: list[EntitySnapshotPath] = Field(min_length=1, max_length=20)
+    paths: list[EntitySnapshotPath] = Field(min_length=1)
+
+
+class ReportReadInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    report_refs: list[ReportRef] = Field(min_length=1)
 
 
 class StyleReadInput(BaseModel):
@@ -107,6 +114,24 @@ class LocationRenameInput(BaseModel):
     new_name: ContentName
 
 
+class GoalReadInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class GoalCreateInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    description: str = Field(default="", max_length=4_000)
+    profile: dict[str, Any]
+
+
+class GoalEditInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    old_text: str = Field(min_length=1, max_length=170_000)
+    new_text: str = Field(max_length=170_000)
+
+
 class FileReadInput(BaseModel):
     path: str
 
@@ -143,6 +168,10 @@ class NarrativePublishInput(BaseModel):
     path: str
 
 
+class NarrativeTokenCountInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 @dataclass(frozen=True)
 class CapabilityContext:
     save_id: str
@@ -154,6 +183,8 @@ class CapabilityContext:
     drawing_preset: DrawingPreset | None = None
     portrait_settings: CharacterPortraitGenerationSettings | None = None
     network_settings: NetworkSettings | None = None
+    token_counting_settings: NarrativeTokenCountingSettings | None = None
+    report_resolver: Callable[[list[ReportRef]], Awaitable[list[dict[str, Any]]]] | None = None
 
 
 CapabilityHandler = Callable[[BaseModel, CapabilityContext], Awaitable[dict[str, Any]]]
@@ -212,6 +243,13 @@ class CapabilityExecutor:
 
 
 def build_runtime_capability_registry(saves: SaveStore, styles: ContentStore) -> CapabilityRegistry:
+    async def report_read(request: BaseModel, context: CapabilityContext) -> dict[str, Any]:
+        value = _require(request, ReportReadInput)
+        if context.report_resolver is None:
+            raise CapabilityPermissionError("缺少报告读取上下文")
+        reports = await context.report_resolver(value.report_refs)
+        return {"report_documents": reports, "target_agent": context.agent}
+
     async def entity_search(request: BaseModel, context: CapabilityContext) -> dict[str, Any]:
         value = _require(request, EntitySearchInput)
         results = await _thread(saves.search_entities, context.save_id, value.query)
@@ -234,14 +272,13 @@ def build_runtime_capability_registry(saves: SaveStore, styles: ContentStore) ->
         else:
             reader = saves.read_entities
         documents = await _thread(reader, context.save_id, value.paths)
-        required_paths = set(await _thread(saves.required_entity_paths, context.save_id))
         counter = await _retrieval_counter(saves, context, read_documents=documents)
         payload = {
             "requested_paths": value.paths,
             "documents": documents,
-            "excluded_required_paths": [path for path in value.paths if path in required_paths],
             "retrieval_counter": counter,
             "retrieval_counter_warning": RETRIEVAL_COUNTER_WARNING,
+            "target_agent": context.agent,
         }
         await context.emit("entity.read", payload)
         return payload
@@ -295,6 +332,12 @@ def build_runtime_capability_registry(saves: SaveStore, styles: ContentStore) ->
         if unavailable:
             raise CapabilityError(f"报告引用了本次规划未读取的文风：{', '.join(unavailable)}")
         return value.model_dump()
+
+    async def compliance_report(request: BaseModel, context: CapabilityContext) -> dict[str, Any]:
+        return _require(request, ComplianceReviewResult).model_dump()
+
+    async def text_report(request: BaseModel, context: CapabilityContext) -> dict[str, Any]:
+        return _require(request, TextReport).model_dump()
 
     async def image_read(request: BaseModel, context: CapabilityContext) -> dict[str, Any]:
         value = _require(request, ImageReadInput)
@@ -440,6 +483,22 @@ def build_runtime_capability_registry(saves: SaveStore, styles: ContentStore) ->
         await _thread(saves.read_entities_exact, context.save_id, value.related_entities)
         return value.model_dump()
 
+    async def goal_read(request: BaseModel, context: CapabilityContext) -> dict[str, Any]:
+        _require(request, GoalReadInput)
+        return {"goal": await _thread(saves.read_goal, context.save_id, for_edit=True)}
+
+    async def goal_create(request: BaseModel, context: CapabilityContext) -> dict[str, Any]:
+        value = _require(request, GoalCreateInput)
+        goal = await _thread(saves.create_goal, context.save_id, value.description, value.profile)
+        await context.emit("goal.created", {"goal": goal})
+        return {"goal": goal}
+
+    async def goal_edit(request: BaseModel, context: CapabilityContext) -> dict[str, Any]:
+        value = _require(request, GoalEditInput)
+        goal = await _thread(saves.edit_goal, context.save_id, value.old_text, value.new_text)
+        await context.emit("goal.edited", {"goal": goal})
+        return {"goal": goal}
+
     async def file_read(request: BaseModel, context: CapabilityContext) -> dict[str, Any]:
         value = _require(request, FileReadInput)
         _require_narrative_path(value.path, context.agent, {"coordinator", "narrator", "consistency_checker"})
@@ -459,6 +518,26 @@ def build_runtime_capability_registry(saves: SaveStore, styles: ContentStore) ->
         files = DraftFileStore(saves.draft_dir(context.save_id, context.turn_id))
         await _thread(files.edit, value.path, value.old_text, value.new_text)
         return {"path": value.path, "content": await _thread(files.read, value.path)}
+
+    async def narrative_token_count(request: BaseModel, context: CapabilityContext) -> dict[str, Any]:
+        _require(request, NarrativeTokenCountInput)
+        if context.agent not in {"narrator", "consistency_checker"}:
+            raise CapabilityPermissionError("仅叙事 Agent 和一致性检查 Agent 可以检查叙事 Token")
+        settings = context.token_counting_settings
+        if settings is None or not settings.enabled:
+            raise CapabilityError("叙事 Token 计数能力未启用")
+        path = "narrative.md"
+        content = await _thread(DraftFileStore(saves.draft_dir(context.save_id, context.turn_id)).read, path)
+        token_count = await _thread(count_narrative_tokens, content)
+        excess_tokens = max(0, token_count - settings.max_tokens)
+        return {
+            "path": path,
+            "encoding": ENCODING_NAME,
+            "token_count": token_count,
+            "max_tokens": settings.max_tokens,
+            "over_limit": excess_tokens > 0,
+            "excess_tokens": excess_tokens,
+        }
 
     async def story_summary_read(request: BaseModel, context: CapabilityContext) -> dict[str, Any]:
         _require(request, StorySummaryReadInput)
@@ -483,9 +562,13 @@ def build_runtime_capability_registry(saves: SaveStore, styles: ContentStore) ->
         [
             CapabilitySpec("entity_search", EntitySearchInput, entity_search),
             CapabilitySpec("entity_read", EntityReadInput, entity_read),
+            CapabilitySpec("report_read", ReportReadInput, report_read),
             CapabilitySpec("research_report", WorldResearchReport, research_report),
             CapabilitySpec("style_read", StyleReadInput, style_read),
             CapabilitySpec("style_report", StylePlanningReport, style_report),
+            CapabilitySpec("compliance_report", ComplianceReviewResult, compliance_report),
+            CapabilitySpec("erotic_report", TextReport, text_report),
+            CapabilitySpec("role_report", TextReport, text_report),
             CapabilitySpec("image_read", ImageReadInput, image_read),
             CapabilitySpec("character_portrait_generate", CharacterPortraitGenerateInput, character_portrait_generate),
             CapabilitySpec("character_create", CharacterCreateInput, character_create),
@@ -496,9 +579,13 @@ def build_runtime_capability_registry(saves: SaveStore, styles: ContentStore) ->
             CapabilitySpec("location_edit", LocationEditInput, location_edit),
             CapabilitySpec("location_rename", LocationRenameInput, location_rename),
             CapabilitySpec("location_report", LocationChangeReport, location_report),
+            CapabilitySpec("goal_read", GoalReadInput, goal_read),
+            CapabilitySpec("goal_create", GoalCreateInput, goal_create),
+            CapabilitySpec("goal_edit", GoalEditInput, goal_edit),
             CapabilitySpec("file_read", FileReadInput, file_read),
             CapabilitySpec("file_write", FileWriteInput, file_write),
             CapabilitySpec("file_edit", FileEditInput, file_edit),
+            CapabilitySpec("narrative_token_count", NarrativeTokenCountInput, narrative_token_count),
             CapabilitySpec("story_summary_read", StorySummaryReadInput, story_summary_read),
             CapabilitySpec("story_summary_edit", StorySummaryEditInput, story_summary_edit),
             CapabilitySpec("story_history_read", StoryHistoryReadInput, story_history_read),
@@ -530,6 +617,7 @@ async def _retrieval_counter(
             read_paths.update(_entity_paths(output.get("documents")))
 
     read_paths.update(_entity_paths(read_documents))
+    read_paths.difference_update(await _thread(saves.required_entity_paths, context.save_id))
     return {
         "total_searchable_entities": await _thread(saves.searchable_entity_count, context.save_id),
         "read_entities": len(read_paths),

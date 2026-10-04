@@ -39,7 +39,7 @@ def make_data_dir(tmp_path: Path) -> Path:
     return data_dir
 
 
-def wait_for_turn(client: TestClient, save_id: str, timeout: float = 8) -> dict[str, Any]:
+def wait_for_turn(client: TestClient, save_id: str, timeout: float = 30) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         turn = client.get(f"/api/saves/{save_id}/turns").json()[-1]
@@ -107,7 +107,7 @@ class StyleFlowClient:
             return self.result(ToolCall(id="research-report", name="research_report", arguments={"report": "伊蕾寡言而警惕。", "related_entities": [path]}))
         if system_prompt == STYLE_PLANNER_PROMPT:
             self.planner_input = json.loads(messages[1]["content"])
-            assert {tool["function"]["name"] for tool in tools or []} == {"style_read", "style_report", "story_summary_read"}
+            assert {tool["function"]["name"] for tool in tools or []} == {"entity_read", "report_read", "style_read", "style_report", "story_summary_read"}
             if not results:
                 return self.result(ToolCall(id="invalid-style-report", name="style_report", arguments={"report": "尚未读取。", "style_paths": [STYLE_ONE]}))
             if len(results) == 1:

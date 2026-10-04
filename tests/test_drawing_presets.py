@@ -71,7 +71,10 @@ def test_drawing_preset_crud_default_and_password_rules(tmp_path: Path) -> None:
         )
         assert stale.status_code == 422
 
-        settings = {"character_portrait_generation": portrait_settings_payload(novelai_sampler="k_euler_ancestral")}
+        settings = {
+            "character_portrait_generation": portrait_settings_payload(novelai_sampler="k_euler_ancestral"),
+            "narrative_token_counting": {"enabled": False, "max_tokens": 4_000},
+        }
         updated_settings = client.put("/api/capability-settings", json=settings)
         assert updated_settings.status_code == 200
         assert updated_settings.json() == settings

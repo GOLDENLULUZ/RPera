@@ -39,9 +39,7 @@ def test_prompt_store_loads_every_registered_agent(tmp_path: Path) -> None:
     assert {
         path.stem for path in (PROJECT_PROMPTS / "capabilities").glob("*.md")
     } == expected_capabilities
-    compliance = snapshot.fixed_responses["compliance_reviewer"]
-    assert compliance.approved is True
-    assert compliance.reason
+    assert snapshot.fixed_responses == {}
     assert snapshot.prefills == {}
 
 
@@ -74,6 +72,15 @@ def test_prompt_store_ignores_disabled_checker_placeholder(tmp_path: Path) -> No
     assert "consistency_checker" not in PromptStore(root, AGENTS).load(
         frozenset({"coordinator", "narrator"})
     ).prompts
+
+
+@pytest.mark.parametrize("content", ["没有上限占位符", "{max_tokens}\n{max_tokens}"])
+def test_prompt_store_requires_one_token_limit_placeholder(tmp_path: Path, content: str) -> None:
+    root = copy_prompts(tmp_path)
+    (root / "capabilities" / "narrative_token_count.md").write_text(content, encoding="utf-8")
+
+    with pytest.raises(PromptConfigurationError, match="叙事 Token 计数 Capability 描述必须且只能包含一个"):
+        PromptStore(root, AGENTS).load(frozenset({"coordinator", "narrator"}))
 
 
 def test_invalid_save_settings_placeholder_does_not_create_turn(tmp_path: Path) -> None:
@@ -120,6 +127,9 @@ def test_prompt_store_only_loads_enabled_agents(tmp_path: Path) -> None:
         "file_write",
         "file_edit",
         "narrative_publish",
+        "narrative_token_count",
+        "entity_read",
+        "report_read",
     }
     assert snapshot.fixed_responses == {}
 
@@ -191,7 +201,10 @@ def test_prompt_store_rejects_invalid_enabled_fixed_response(
     (tmp_path / "mock_responses" / "compliance_reviewer.json").write_bytes(content)
 
     with pytest.raises(PromptConfigurationError, match=message):
-        PromptStore(root, AGENTS).load(frozenset({"coordinator", "compliance_reviewer", "narrator"}))
+        PromptStore(root, AGENTS).load(
+            frozenset({"coordinator", "compliance_reviewer", "narrator"}),
+            fixed_response_agents=frozenset({"compliance_reviewer"}),
+        )
 
 
 def test_prompt_store_ignores_disabled_fixed_response(tmp_path: Path) -> None:
@@ -206,7 +219,10 @@ def test_prompt_store_ignores_disabled_fixed_response(tmp_path: Path) -> None:
 def test_fixed_response_snapshot_does_not_change_with_file(tmp_path: Path) -> None:
     root = copy_prompts(tmp_path)
     store = PromptStore(root, AGENTS)
-    snapshot = store.load(frozenset({"coordinator", "compliance_reviewer", "narrator"}))
+    snapshot = store.load(
+        frozenset({"coordinator", "compliance_reviewer", "narrator"}),
+        fixed_response_agents=frozenset({"compliance_reviewer"}),
+    )
 
     (tmp_path / "mock_responses" / "compliance_reviewer.json").write_text(
         '{"approved": false, "reason": "后来修改"}',
@@ -215,20 +231,38 @@ def test_fixed_response_snapshot_does_not_change_with_file(tmp_path: Path) -> No
 
     assert snapshot.fixed_responses["compliance_reviewer"].approved is True
     assert store.load(
-        frozenset({"coordinator", "compliance_reviewer", "narrator"})
+        frozenset({"coordinator", "compliance_reviewer", "narrator"}),
+        fixed_response_agents=frozenset({"compliance_reviewer"}),
     ).fixed_responses["compliance_reviewer"].approved is False
 
 
 def test_prompt_store_loads_only_active_model_prefills(tmp_path: Path) -> None:
     root = copy_prompts(tmp_path)
     (tmp_path / "prefills" / "coordinator.md").write_text("我将继续处理：", encoding="utf-8")
+    (tmp_path / "prefills" / "compliance_reviewer.md").write_text("审核结果：", encoding="utf-8")
 
     snapshot = PromptStore(root, AGENTS).load(
         frozenset({"coordinator", "compliance_reviewer", "narrator"}),
         frozenset({"coordinator", "compliance_reviewer"}),
     )
 
-    assert snapshot.prefills == {"coordinator": "我将继续处理："}
+    assert snapshot.prefills == {
+        "coordinator": "我将继续处理：",
+        "compliance_reviewer": "审核结果：",
+    }
+
+
+def test_prompt_store_ignores_prefill_for_active_fixed_response(tmp_path: Path) -> None:
+    root = copy_prompts(tmp_path)
+
+    snapshot = PromptStore(root, AGENTS).load(
+        frozenset({"coordinator", "compliance_reviewer", "narrator"}),
+        frozenset({"compliance_reviewer"}),
+        frozenset({"compliance_reviewer"}),
+    )
+
+    assert snapshot.prefills == {}
+    assert snapshot.fixed_responses["compliance_reviewer"].reason
 
 
 def test_prompt_store_rejects_empty_active_prefill(tmp_path: Path) -> None:

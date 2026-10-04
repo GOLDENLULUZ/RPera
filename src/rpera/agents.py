@@ -25,6 +25,12 @@ class ReportRef(BaseModel):
     id: str = Field(min_length=1, max_length=100)
 
 
+class TextReport(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    report: str = Field(min_length=1, max_length=20_000)
+
+
 class TaskToolInput(AgentTask):
     agent: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
     task_id: str | None = Field(default=None, description="传入已有 task_id 继续同一子代理会话；省略则创建新会话")
@@ -59,8 +65,9 @@ class TaskToolInput(AgentTask):
 
     @model_validator(mode="after")
     def validate_entity_transfer(self) -> TaskToolInput:
-        if self.related_entities and self.agent not in {"character_designer", "location_designer", "EroticOrNot", "role_player", "style_planner", "narrator"}:
-            raise ValueError("related_entities 只能传递给 character_designer、location_designer、EroticOrNot、role_player、style_planner 或 narrator")
+        receiver = next((spec for spec in AGENTS.children() if spec.name == self.agent), None)
+        if self.related_entities and (receiver is None or self.agent == "world_researcher" or not receiver.accepts_entities):
+            raise ValueError("related_entities 只能显式传递给允许接收实体的子代理（不包括 world_researcher）")
         if self.related_entities and self.task_id is not None:
             raise ValueError("继续子代理会话时不能重新传递 related_entities")
         if self.style_paths and self.agent != "narrator":
@@ -132,6 +139,7 @@ class AgentSpec:
     can_disable: bool = True
     fixed_response_file: str | None = None
     produces_reports: bool = False
+    accepts_entities: bool = False
 
 
 class AgentRegistry:
@@ -167,16 +175,17 @@ class AgentRegistry:
 
 AGENTS = AgentRegistry((
     AgentSpec("coordinator", "主代理 / 总调度师", "coordinator.md", None, AgentTask, frozenset({"file_read", "narrative_publish"}), 0, True, False),
-    AgentSpec("story_summarizer", "故事总结 Agent", "story_summarizer.md", "task_descriptions/story_summarizer.md", AgentTask, frozenset({"story_summary_read", "story_summary_edit", "story_history_read"}), template_order=1, produces_reports=True),
-    AgentSpec("world_researcher", "世界检索 Agent", "world_researcher.md", "task_descriptions/world_researcher.md", AgentTask, frozenset({"entity_search", "entity_read", "research_report"}), template_order=10, produces_reports=True),
-    AgentSpec("character_designer", "角色设计 Agent", "character_designer.md", "task_descriptions/character_designer.md", AgentTask, frozenset({"entity_search", "entity_read", "image_read", "character_portrait_generate", "character_create", "character_edit", "character_rename", "character_report"}), template_order=11, produces_reports=True),
-    AgentSpec("location_designer", "地点设计 Agent", "location_designer.md", "task_descriptions/location_designer.md", AgentTask, frozenset({"entity_search", "entity_read", "location_create", "location_edit", "location_rename", "location_report"}), template_order=12, produces_reports=True),
-    AgentSpec("compliance_reviewer", "合规性审核 Agent", "compliance_reviewer.md", "task_descriptions/compliance_reviewer.md", AgentTask, frozenset(), template_order=13, fixed_response_file="compliance_reviewer.json", produces_reports=True),
-    AgentSpec("EroticOrNot", "够色了吗 Agent", "EroticOrNot.md", "task_descriptions/EroticOrNot.md", AgentTask, frozenset(), template_order=15, produces_reports=True),
-    AgentSpec("role_player", "角色扮演 Agent", "role_player.md", "task_descriptions/role_player.md", AgentTask, frozenset(), template_order=20, produces_reports=True),
-    AgentSpec("style_planner", "文风规划 Agent", "style_planner.md", "task_descriptions/style_planner.md", AgentTask, frozenset({"style_read", "style_report"}), template_order=30, produces_reports=True),
-    AgentSpec("narrator", "叙事 Agent", "narrator.md", "task_descriptions/narrator.md", AgentTask, frozenset({"file_read", "file_write", "file_edit"}), can_disable=False, template_order=98, produces_reports=True),
-    AgentSpec("consistency_checker", "一致性检查 Agent", "consistency_checker.md", "task_descriptions/consistency_checker.md", AgentTask, frozenset({"file_read"}), template_order=99, produces_reports=True),
+    AgentSpec("story_summarizer", "故事总结 Agent", "story_summarizer.md", "task_descriptions/story_summarizer.md", AgentTask, frozenset({"entity_read", "report_read", "story_summary_read", "story_summary_edit", "story_history_read"}), template_order=2, produces_reports=True),
+    AgentSpec("world_researcher", "世界检索 Agent", "world_researcher.md", "task_descriptions/world_researcher.md", AgentTask, frozenset({"entity_search", "entity_read", "report_read", "research_report"}), template_order=10, produces_reports=True, accepts_entities=True),
+    AgentSpec("character_designer", "角色设计 Agent", "character_designer.md", "task_descriptions/character_designer.md", AgentTask, frozenset({"entity_search", "entity_read", "report_read", "image_read", "character_portrait_generate", "character_create", "character_edit", "character_rename", "character_report"}), template_order=11, produces_reports=True, accepts_entities=True),
+    AgentSpec("location_designer", "地点设计 Agent", "location_designer.md", "task_descriptions/location_designer.md", AgentTask, frozenset({"entity_search", "entity_read", "report_read", "location_create", "location_edit", "location_rename", "location_report"}), template_order=12, produces_reports=True, accepts_entities=True),
+    AgentSpec("compliance_reviewer", "合规性审核 Agent", "compliance_reviewer.md", "task_descriptions/compliance_reviewer.md", AgentTask, frozenset({"entity_read", "report_read", "compliance_report"}), template_order=1, fixed_response_file="compliance_reviewer.json", produces_reports=True),
+    AgentSpec("EroticOrNot", "够色了吗 Agent", "EroticOrNot.md", "task_descriptions/EroticOrNot.md", AgentTask, frozenset({"entity_read", "report_read", "erotic_report"}), template_order=15, produces_reports=True, accepts_entities=True),
+    AgentSpec("goal_keeper", "目标维护 Agent", "goal_keeper.md", "task_descriptions/goal_keeper.md", AgentTask, frozenset({"entity_read", "report_read", "goal_read", "goal_create", "goal_edit"}), template_order=16, accepts_entities=True),
+    AgentSpec("role_player", "角色扮演 Agent", "role_player.md", "task_descriptions/role_player.md", AgentTask, frozenset({"entity_read", "report_read", "role_report"}), template_order=20, produces_reports=True, accepts_entities=True),
+    AgentSpec("style_planner", "文风规划 Agent", "style_planner.md", "task_descriptions/style_planner.md", AgentTask, frozenset({"entity_read", "report_read", "style_read", "style_report"}), template_order=30, produces_reports=True, accepts_entities=True),
+    AgentSpec("narrator", "叙事 Agent", "narrator.md", "task_descriptions/narrator.md", AgentTask, frozenset({"entity_read", "report_read", "file_read", "file_write", "file_edit", "narrative_token_count"}), can_disable=False, template_order=98, produces_reports=True, accepts_entities=True),
+    AgentSpec("consistency_checker", "一致性检查 Agent", "consistency_checker.md", "task_descriptions/consistency_checker.md", AgentTask, frozenset({"entity_read", "report_read", "file_read", "narrative_token_count"}), template_order=99, produces_reports=True),
 ))
 
 
@@ -186,7 +195,7 @@ class AgentDescriptor:
     label: str
     is_main: bool = False
     can_disable: bool = True
-    uses_fixed_response: bool = False
+    supports_fixed_response: bool = False
     produces_reports: bool = False
 
 

@@ -18,8 +18,9 @@ from rpera.config import PresetStore, RuntimeSettingsStore
 from rpera.content import content_name, content_name_key, entity_snapshot_path
 from rpera.entities import EntityEntry, EntityStore, search_entry_list
 from rpera.gemini import request_payload as gemini_request_payload
-from rpera.models import AgentPresetSettingsWrite, AiPreset, ModelResult, PresetWrite, RuntimeSettings, SaveCreate, ToolCall
-from rpera.providers import BoundModelClient, ConfiguredModelClient
+from rpera.models import AgentPresetSettingsWrite, AiPreset, ModelListRequest, ModelResult, PresetWrite, RuntimeSettings, SaveCreate, ToolCall
+from rpera.model_errors import ModelFallbackError
+from rpera.providers import BoundModelClient, ConfiguredModelClient, FallbackModelClient
 from rpera.runtime import AgentRunner
 from tests.prompt_fixtures import COORDINATOR_PROMPT, NARRATOR_PROMPT, TASK_DESCRIPTIONS, WORLD_RESEARCHER_PROMPT
 from rpera.storage import WorldLibrary
@@ -282,7 +283,7 @@ def test_complete_agent_flow_and_save_isolation(tmp_path: Path) -> None:
         researcher_request = next(
             event for event in events if event.type == "model.request" and event.payload["agent"] == "world_researcher"
         )
-        assert {tool["function"]["name"] for tool in researcher_request.payload["tools"]} == {"entity_search", "entity_read", "research_report", "story_summary_read"}
+        assert {tool["function"]["name"] for tool in researcher_request.payload["tools"]} == {"entity_search", "entity_read", "report_read", "research_report", "story_summary_read"}
         researcher_story = json.loads(researcher_request.payload["messages"][0]["content"])
         assert researcher_story == expected_story
         assert any(message["role"] == "tool" for message in researcher_request.payload["messages"][1:]) is False
@@ -716,7 +717,7 @@ def test_delete_save_removes_it_and_clamps_pagination(tmp_path: Path) -> None:
         assert saves["total"] == 10
 
 
-def test_delete_save_rejects_invalid_running_and_subscribed_saves(tmp_path: Path) -> None:
+def test_delete_save_rejects_invalid_and_running_but_closes_subscribers(tmp_path: Path) -> None:
     data_dir = make_data_dir(tmp_path)
     app = create_app(data_dir=data_dir, model_client=ScriptedModelClient())
 
@@ -738,13 +739,11 @@ def test_delete_save_rejects_invalid_running_and_subscribed_saves(tmp_path: Path
             {"message": "测试结束"},
         )
         subscription = app.state.events.subscribe(save["id"])
-        subscribed = client.delete(f"/api/saves/{save['id']}")
+        deleted = client.delete(f"/api/saves/{save['id']}")
 
-        assert subscribed.status_code == 409
-        assert (data_dir / "saves" / save["id"]).is_dir()
-
-        app.state.events.unsubscribe(save["id"], subscription)
-        assert client.delete(f"/api/saves/{save['id']}").status_code == 200
+        assert deleted.status_code == 200
+        assert not (data_dir / "saves" / save["id"]).exists()
+        assert subscription.get_nowait() is True
 
 
 def preset_payload(**overrides: Any) -> dict[str, Any]:
@@ -776,10 +775,10 @@ def test_runtime_settings_are_global_and_unbounded_above(tmp_path: Path) -> None
     data_dir = make_data_dir(tmp_path)
     app = create_app(data_dir=data_dir, model_client=ScriptedModelClient())
     with TestClient(app) as client:
-        assert client.get("/api/runtime-settings").json() == {"max_delegations": 20, "context_turns": 4, "disabled_agents": [], "prefill_agents": [], "blocked_instruction_agents": [], "always_attach_report_agents": [], "force_publish_narrative": False, "force_start_delegation": False, "block_coordinator_narrative_read": False}
+        assert client.get("/api/runtime-settings").json() == {"max_delegations": 20, "context_turns": 4, "disabled_agents": [], "prefill_agents": [], "blocked_instruction_agents": [], "always_attach_report_agents": [], "force_publish_narrative": False, "force_start_delegation": False, "block_coordinator_narrative_read": False, "use_compliance_fixed_response": False}
         assert client.put("/api/runtime-settings", json={"max_delegations": 3, "context_turns": 4, "disabled_agents": [], "blocked_instruction_agents": []}).status_code == 422
-        updated = client.put("/api/runtime-settings", json={"max_delegations": 100_000, "context_turns": 7, "disabled_agents": ["role_player"], "prefill_agents": ["coordinator", "role_player"], "blocked_instruction_agents": ["role_player", "narrator"], "always_attach_report_agents": ["role_player", "narrator"], "force_publish_narrative": True, "force_start_delegation": True, "block_coordinator_narrative_read": True}).json()
-        assert updated == {"max_delegations": 100_000, "context_turns": 7, "disabled_agents": ["role_player"], "prefill_agents": ["coordinator", "role_player"], "blocked_instruction_agents": ["role_player", "narrator"], "always_attach_report_agents": ["role_player", "narrator"], "force_publish_narrative": True, "force_start_delegation": True, "block_coordinator_narrative_read": True}
+        updated = client.put("/api/runtime-settings", json={"max_delegations": 100_000, "context_turns": 7, "disabled_agents": ["role_player"], "prefill_agents": ["coordinator", "role_player"], "blocked_instruction_agents": ["role_player", "narrator"], "always_attach_report_agents": ["role_player", "narrator"], "force_publish_narrative": True, "force_start_delegation": True, "block_coordinator_narrative_read": True, "use_compliance_fixed_response": True}).json()
+        assert updated == {"max_delegations": 100_000, "context_turns": 7, "disabled_agents": ["role_player"], "prefill_agents": ["coordinator", "role_player"], "blocked_instruction_agents": ["role_player", "narrator"], "always_attach_report_agents": ["role_player", "narrator"], "force_publish_narrative": True, "force_start_delegation": True, "block_coordinator_narrative_read": True, "use_compliance_fixed_response": True}
     settings = RuntimeSettings.model_validate_json(
         (data_dir / "config" / "runtime_settings.json").read_text(encoding="utf-8")
     )
@@ -792,6 +791,7 @@ def test_runtime_settings_are_global_and_unbounded_above(tmp_path: Path) -> None
     assert settings.force_publish_narrative is True
     assert settings.force_start_delegation is True
     assert settings.block_coordinator_narrative_read is True
+    assert settings.use_compliance_fixed_response is True
 
 
 def test_runtime_settings_require_integer_context_turns_at_least_two(tmp_path: Path) -> None:
@@ -892,6 +892,7 @@ def test_runtime_settings_default_missing_report_attachment_list(tmp_path: Path)
     assert settings.force_publish_narrative is False
     assert settings.force_start_delegation is False
     assert settings.block_coordinator_narrative_read is False
+    assert settings.use_compliance_fixed_response is False
     assert path.read_text(encoding="utf-8") == existing_content
 
 
@@ -961,6 +962,71 @@ def test_ai_preset_crud_and_secret_rules(tmp_path: Path) -> None:
         assert "second-secret" not in preset_file.read_text(encoding="utf-8")
 
 
+def test_model_list_preset_uses_unsaved_settings_and_preserves_matching_key(tmp_path: Path) -> None:
+    store = PresetStore(make_data_dir(tmp_path))
+    preset_id = store.public().main_preset_id
+    store.update(preset_id, PresetWrite.model_validate(preset_payload(api_key="saved-secret")))
+
+    unsaved = store.model_list_preset(ModelListRequest(
+        provider="openai_compatible",
+        base_url="https://new.example/v1/",
+        api_key="new-secret",
+        timeout_seconds=45,
+    ))
+    existing = store.model_list_preset(ModelListRequest(
+        preset_id=preset_id,
+        provider="deepseek",
+        base_url="https://edited.example/",
+        timeout_seconds=60,
+    ))
+    switched = store.model_list_preset(ModelListRequest(
+        preset_id=preset_id,
+        provider="anthropic",
+        base_url="https://api.anthropic.com/v1",
+    ))
+
+    assert unsaved.id == "unsaved"
+    assert unsaved.base_url == "https://new.example/v1"
+    assert unsaved.api_key == "new-secret"
+    assert unsaved.timeout_seconds == 45
+    assert existing.api_key == "saved-secret"
+    assert existing.base_url == "https://edited.example"
+    assert switched.api_key == ""
+
+
+def test_unsaved_preset_can_list_models_without_being_persisted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[AiPreset] = []
+
+    class ModelListingClient:
+        def __init__(self, preset: AiPreset, **_kwargs: Any) -> None:
+            captured.append(preset)
+
+        async def list_models(self) -> list[dict[str, str]]:
+            return [{"id": "available-model", "owned_by": "local"}]
+
+    data_dir = make_data_dir(tmp_path)
+    monkeypatch.setattr("rpera.app.BoundModelClient", ModelListingClient)
+    app = create_app(data_dir=data_dir, model_client=ScriptedModelClient())
+
+    with TestClient(app) as client:
+        response = client.post("/api/ai-presets/models", json={
+            "preset_id": None,
+            "provider": "openai_compatible",
+            "base_url": "https://provider.example/v1",
+            "api_key": "draft-secret",
+            "xai_protocol": "responses",
+            "timeout_seconds": 30,
+        })
+
+    assert response.status_code == 200
+    assert response.json() == [{"id": "available-model", "owned_by": "local"}]
+    assert captured[0].model == ""
+    assert captured[0].api_key == "draft-secret"
+    assert not (data_dir / "config" / "ai_presets.json").exists()
+
+
 def test_agent_preset_settings_inherit_override_and_remap_deleted_preset(tmp_path: Path) -> None:
     data_dir = make_data_dir(tmp_path)
     app = create_app(data_dir=data_dir, model_client=ScriptedModelClient())
@@ -972,15 +1038,15 @@ def test_agent_preset_settings_inherit_override_and_remap_deleted_preset(tmp_pat
 
         catalog = client.get("/api/agent-preset-settings").json()
         assert [agent["name"] for agent in catalog["agents"]] == [
-            "coordinator", "story_summarizer", "world_researcher", "character_designer", "location_designer", "compliance_reviewer", "EroticOrNot", "role_player", "style_planner", "narrator", "consistency_checker"
+            "coordinator", "compliance_reviewer", "story_summarizer", "world_researcher", "character_designer", "location_designer", "EroticOrNot", "goal_keeper", "role_player", "style_planner", "narrator", "consistency_checker"
         ]
         assert {agent["name"] for agent in catalog["agents"]} == {
-            "coordinator", "story_summarizer", "world_researcher", "character_designer", "location_designer", "compliance_reviewer", "EroticOrNot", "role_player", "style_planner", "narrator", "consistency_checker"
+            "coordinator", "story_summarizer", "world_researcher", "character_designer", "location_designer", "compliance_reviewer", "EroticOrNot", "goal_keeper", "role_player", "style_planner", "narrator", "consistency_checker"
         }
         assert {agent["name"] for agent in catalog["agents"] if agent["can_disable"]} == {
-            "story_summarizer", "world_researcher", "character_designer", "location_designer", "compliance_reviewer", "EroticOrNot", "role_player", "style_planner", "consistency_checker"
+            "story_summarizer", "world_researcher", "character_designer", "location_designer", "compliance_reviewer", "EroticOrNot", "goal_keeper", "role_player", "style_planner", "consistency_checker"
         }
-        assert {agent["name"] for agent in catalog["agents"] if agent["uses_fixed_response"]} == {"compliance_reviewer"}
+        assert {agent["name"] for agent in catalog["agents"] if agent["supports_fixed_response"]} == {"compliance_reviewer"}
         assert {agent["name"] for agent in catalog["agents"] if agent["produces_reports"]} == {
             "story_summarizer", "world_researcher", "character_designer", "location_designer", "compliance_reviewer", "EroticOrNot", "role_player", "style_planner", "narrator", "consistency_checker"
         }
@@ -1008,6 +1074,135 @@ def test_agent_preset_settings_inherit_override_and_remap_deleted_preset(tmp_pat
         assert deleted["agent_streaming"] == {"compliance_reviewer": True}
 
 
+def test_shared_ai_fallback_settings_and_deleted_preset(tmp_path: Path) -> None:
+    app = create_app(data_dir=make_data_dir(tmp_path), model_client=ScriptedModelClient())
+    with TestClient(app) as client:
+        first_id = client.get("/api/ai-presets").json()["main_preset_id"]
+        assert client.get("/api/ai-fallback-settings").json() == {"enabled": False, "preset_id": None}
+        assert client.put("/api/ai-fallback-settings", json={"enabled": True, "preset_id": None}).status_code == 422
+        # A fallback may intentionally be the same preset as the preferred model.
+        assert client.put("/api/ai-fallback-settings", json={"enabled": True, "preset_id": first_id}).json() == {
+            "enabled": True, "preset_id": first_id,
+        }
+        bound = app.state.presets.resolve_with_fallback(("coordinator", "narrator"))
+        assert all(primary.id == fallback.id == first_id for primary, fallback, _streaming in bound.values())
+        clients = ConfiguredModelClient(app.state.presets).bind_for_agents(("coordinator", "narrator"))
+        assert all(isinstance(model, FallbackModelClient) for model in clients.values())
+        created = client.post("/api/ai-presets", json=preset_payload(name="备用模型")).json()
+        backup_id = next(preset["id"] for preset in created["presets"] if preset["name"] == "备用模型")
+        assert client.put("/api/ai-fallback-settings", json={"enabled": True, "preset_id": backup_id}).status_code == 200
+        assert client.delete(f"/api/ai-presets/{backup_id}").json()["fallback_enabled"] is False
+        assert client.get("/api/ai-fallback-settings").json() == {"enabled": False, "preset_id": None}
+        assert all(not isinstance(model, FallbackModelClient) for model in ConfiguredModelClient(app.state.presets).bind_for_agents(("coordinator", "narrator")).values())
+
+
+def test_model_fallback_keeps_completed_tools_and_actual_model_metadata(tmp_path: Path) -> None:
+    class Primary(ScriptedModelClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.blocked = False
+
+        def metadata(self):
+            return {"provider": "test", "model": "primary", "preset_name": "首选"}
+
+        async def complete(self, system_prompt, messages, tools=None):
+            if system_prompt == WORLD_RESEARCHER_PROMPT and self.research_calls == 1 and not self.blocked:
+                self.blocked = True
+                raise ModelFallbackError("content_blocked", "PROHIBITED_CONTENT")
+            return await super().complete(system_prompt, messages, tools)
+
+    class Backup:
+        def __init__(self, primary):
+            self.primary = primary
+            self.calls = 0
+
+        def metadata(self):
+            return {"provider": "test", "model": "backup", "preset_name": "备用"}
+
+        async def complete(self, system_prompt, messages, tools=None):
+            self.calls += 1
+            return await ScriptedModelClient.complete(self.primary, system_prompt, messages, tools)
+
+    class Routed:
+        def __init__(self):
+            self.primary = Primary()
+            self.backup = Backup(self.primary)
+
+        def bind_for_agents(self, names):
+            return {name: FallbackModelClient(self.primary, self.backup) for name in names}
+
+    model = Routed()
+    app = create_app(data_dir=make_data_dir(tmp_path), model_client=model)
+    with TestClient(app) as client:
+        save = client.post("/api/saves", json={"world_name": "雾港", "name": "备用测试"}).json()
+        client.post(f"/api/saves/{save['id']}/turns", json={"content": "打听灯塔"})
+        assert wait_for_turn(client, save["id"])["status"] == "completed"
+        assert model.backup.calls == 1
+        assert model.primary.research_calls == 3
+        events = app.state.saves.list_events(save["id"])
+        fallback = next(event for event in events if event.type == "model.fallback")
+        assert fallback.payload["reason"] == "content_blocked"
+        requests = [event for event in events if event.type == "model.request" and event.payload["message_id"] == fallback.payload["message_id"]]
+        assert [event.payload["model"]["model"] for event in requests] == ["primary", "backup"]
+        with app.state.saves.connect(save["id"]) as db:
+            row = db.execute("SELECT model FROM messages WHERE id = ?", (fallback.payload["message_id"],)).fetchone()
+        assert json.loads(row["model"])["model"] == "backup"
+        assert len([event for event in events if event.type == "tool.completed" and event.payload["tool"] == "entity_search"]) == 1
+
+
+def test_cross_provider_fallback_does_not_replay_foreign_native_messages() -> None:
+    story = {"story": {"opening": "", "turns": [{"turn_number": 1, "player": {"content": "继续", "images": []}, "has_ai_output": False}]}}
+    messages = [
+        {"role": "user", "model": None, "parts": [{"type": "text", "content": "任务"}]},
+        {"role": "assistant", "model": json.dumps({
+            "provider": "google_gemini", "xai_protocol": "responses",
+            "provider_content": {"role": "model", "parts": [{"functionCall": {"name": "entity_search", "args": {"query": "伊蕾"}}, "thoughtSignature": "native-signature"}]},
+        }), "parts": [{"type": "tool", "content": None, "provider_call_id": "gemini-1", "tool_name": "entity_search", "input": '{"query":"伊蕾"}', "state": "completed", "output": '{"documents":[]}'}]},
+    ]
+    primary = AgentRunner._provider_messages(messages, story, target_model={"provider": "google_gemini", "xai_protocol": "responses"})
+    backup = AgentRunner._provider_messages(messages, story, target_model={"provider": "anthropic", "xai_protocol": "responses"})
+    assert primary[2]["_provider_content"]["parts"][0]["thoughtSignature"] == "native-signature"
+    assert "_provider_content" not in backup[2]
+    assert backup[2]["tool_calls"][0]["function"]["name"] == "entity_search"
+    assert backup[3]["role"] == "tool"
+
+
+def test_failed_fallback_stops_after_one_additional_request(tmp_path: Path) -> None:
+    class Refusing(ScriptedModelClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def complete(self, system_prompt, messages, tools=None):
+            self.calls += 1
+            raise ModelFallbackError("content_blocked", "PROHIBITED_CONTENT")
+
+    class Unavailable(Refusing):
+        async def complete(self, system_prompt, messages, tools=None):
+            self.calls += 1
+            raise RuntimeError("备用模型故障")
+
+    class Routed:
+        def __init__(self):
+            self.primary = Refusing()
+            self.backup = Unavailable()
+
+        def bind_for_agents(self, names):
+            return {name: FallbackModelClient(self.primary, self.backup) for name in names}
+
+    model = Routed()
+    app = create_app(data_dir=make_data_dir(tmp_path), model_client=model)
+    with TestClient(app) as client:
+        save = client.post("/api/saves", json={"world_name": "雾港", "name": "单次备用"}).json()
+        client.post(f"/api/saves/{save['id']}/turns", json={"content": "继续"})
+        assert wait_for_turn(client, save["id"])["status"] == "failed"
+    assert model.primary.calls == model.backup.calls == 1
+    events = app.state.saves.list_events(save["id"])
+    failure = next(event for event in events if event.type == "turn.failed")
+    assert "备用模型故障" in failure.payload["message"]
+    assert len([event for event in events if event.type == "model.fallback"]) == 1
+
+
 def test_preset_collection_rejects_stale_v1_schema(tmp_path: Path) -> None:
     data_dir = make_data_dir(tmp_path)
     config_dir = data_dir / "config"
@@ -1028,6 +1223,7 @@ def test_home_page_exposes_main_views_and_static_assets(tmp_path: Path) -> None:
     with TestClient(app) as client:
         response = client.get("/")
         javascript = client.get("/static/app.js").text
+        trace_markdown = client.get("/static/trace-markdown.js")
         stylesheet = client.get("/static/app.css").text
     assert response.status_code == 200
     assert "[ 前台 ]" in response.text
@@ -1036,10 +1232,16 @@ def test_home_page_exposes_main_views_and_static_assets(tmp_path: Path) -> None:
     assert "[ 设置 ]" in response.text
     assert "/static/app.css?v=" in response.text
     assert "/static/app.js?v=" in response.text
+    assert "/static/trace-markdown.js?v=" in response.text
+    assert trace_markdown.status_code == 200
+    assert "RPeraTraceMarkdown" in trace_markdown.text
     assert 'id="image-input"' in response.text
     assert 'id="pending-images"' in response.text
     assert 'id="image-preview-dialog"' in response.text
     assert 'id="toggle-style-enabled-button"' in response.text
+    assert response.text.count('value="cancel" type="submit" formnovalidate') == 8
+    assert 'api("/api/ai-presets/models"' in javascript
+    assert "请先保存 Preset，再拉取模型列表" not in javascript
     assert "new FormData()" in javascript
     assert 'body.append("images"' in javascript
     assert '"文风已禁用"' in javascript
@@ -2133,6 +2335,47 @@ async def test_gemini_reports_prompt_and_finish_errors() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_gemini_prohibited_content_is_eligible_for_fallback(streaming: bool) -> None:
+    response = {"candidates": [{"finishReason": "PROHIBITED_CONTENT", "finishMessage": "blocked"}]}
+    if streaming:
+        response = {"promptFeedback": {"blockReason": "PROHIBITED_CONTENT"}}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        if streaming:
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=f"data: {json.dumps(response)}\n\n")
+        return httpx.Response(200, json=response)
+
+    preset = AiPreset(id="gemini", name="Gemini", provider="google_gemini", base_url="https://example.test/v1beta", api_key="key", model="gemini-test")
+    with pytest.raises(ModelFallbackError, match="PROHIBITED_CONTENT") as raised:
+        await BoundModelClient(preset, transport=httpx.MockTransport(handler), streaming=streaming).complete("system", [{"role": "user", "content": "request"}])
+    assert raised.value.reason == "content_blocked"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,eligible", [(400, False), (401, False), (403, False), (429, True), (503, True)])
+async def test_http_fallback_only_for_temporary_failures(status: int, eligible: bool) -> None:
+    preset = AiPreset(id="gemini", name="Gemini", provider="google_gemini", base_url="https://example.test/v1beta", api_key="key", model="gemini-test")
+    client = BoundModelClient(preset, transport=httpx.MockTransport(lambda _request: httpx.Response(status, json={"error": {"message": "unavailable"}})))
+    with pytest.raises(RuntimeError) as raised:
+        await client.complete("system", [{"role": "user", "content": "request"}])
+    assert isinstance(raised.value, ModelFallbackError) is eligible
+
+
+@pytest.mark.asyncio
+async def test_http_explicit_prohibited_content_is_eligible_but_auth_error_is_not() -> None:
+    preset = AiPreset(id="gemini", name="Gemini", provider="google_gemini", base_url="https://example.test/v1beta", api_key="key", model="gemini-test")
+    blocked = BoundModelClient(preset, transport=httpx.MockTransport(lambda _request: httpx.Response(400, json={"error": {"status": "INVALID_ARGUMENT", "message": "PROHIBITED_CONTENT"}})))
+    with pytest.raises(ModelFallbackError) as raised:
+        await blocked.complete("system", [{"role": "user", "content": "request"}])
+    assert raised.value.reason == "content_blocked"
+    unauthorized = BoundModelClient(preset, transport=httpx.MockTransport(lambda _request: httpx.Response(403, json={"error": {"status": "PERMISSION_DENIED", "message": "key not allowed"}})))
+    with pytest.raises(RuntimeError) as raised:
+        await unauthorized.complete("system", [{"role": "user", "content": "request"}])
+    assert not isinstance(raised.value, ModelFallbackError)
+
+
+@pytest.mark.asyncio
 async def test_streaming_model_client_supports_deepseek_and_openai_chunks() -> None:
     preset = AiPreset(
         id="preset-id",
@@ -2558,7 +2801,7 @@ def test_required_entity_reaches_researcher_and_narrator_context(tmp_path: Path)
     ]
 
 
-def test_read_required_entity_is_excluded_and_reported(tmp_path: Path) -> None:
+def test_read_required_entity_returns_current_document(tmp_path: Path) -> None:
     data_dir, world_name = make_required_world(tmp_path)
     app = create_app(data_dir=data_dir, model_client=ScriptedModelClient())
     with TestClient(app) as client:
@@ -2591,8 +2834,9 @@ def test_read_required_entity_is_excluded_and_reported(tmp_path: Path) -> None:
         wait_for_turn(client, save["id"])
     events = app.state.saves.list_turn_events(save["id"], created["turn_id"])
     read_event = next(event for event in events if event.type == "entity.read")
-    assert read_event.payload["excluded_required_paths"] == ["entities/event/核心谜团/ENTITY.md"]
-    assert [doc["path"] for doc in read_event.payload["documents"]] == ["entities/character/安娜/ENTITY.md"]
+    assert [doc["path"] for doc in read_event.payload["documents"]] == [
+        "entities/event/核心谜团/ENTITY.md", "entities/character/安娜/ENTITY.md",
+    ]
     assert read_event.payload["retrieval_counter"] == {
         "total_searchable_entities": 1,
         "read_entities": 1,

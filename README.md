@@ -20,17 +20,18 @@ cd RPera
 2. 在「冒险」中选择示例世界「雾港」，可以再选择模组「读心大师」和开局场景，创建存档。
 3. 输入角色的行动，等待故事生成；在「前台」继续冒险，在「后台」查看运行记录和存档实体。
 
-支持 DeepSeek、OpenAI-compatible、Google Gemini、Anthropic Claude 和 xAI Grok。AI 服务可能按其自身规则收费；没有可用的模型连接时，无法生成故事。结束运行请在终端按 `Ctrl+C`。
+支持 DeepSeek、OpenAI-compatible、Google Gemini、Anthropic Claude 和 xAI Grok。OpenAI-compatible 与 Grok 可以按连接选择 Chat Completions 或 Responses API；还可以配置一个共享备用 AI，在首选模型遇到内容拦截或临时服务错误时额外尝试一次。AI 服务可能按其自身规则收费；没有可用的模型连接时，无法生成故事。结束运行请在终端按 `Ctrl+C`。
 
 ## 能做什么
 
 - 创建独立存档，选择参与模式、叙事人称和语言；从已完成的回合创建分支。
-- 让专业 Agent 按需检索世界设定、维护存档内角色和地点、规划文风、撰写与检查故事。
+- 让专业 Agent 按需总结故事、检索世界设定、维护角色、地点与目标、提供角色意见、规划文风、撰写与检查故事。
 - 上传玩家图片；配置 Stable Diffusion WebUI 或 NovelAI 后，可以选择启用角色立绘生成。
+- 使用可验证的实体与报告引用在 Agent 间传递上下文，并在后台查看安全排版的完整运行记录。
 - 在「创作」中编辑世界、模组、场景、实体和文风；在「后台」查看执行记录与当前存档的实体。
 - 中止正在运行的回合，并在最后一个回合失败或中断后继续执行。
 
-仓库只附带示例世界「雾港」、模组「读心大师」和文风「冷峻悬疑」。可以在「创作」中添加自己的内容。合规性审核 Agent 当前返回本地固定结果，尚未接入真实 AI 审核。
+仓库只附带示例世界「雾港」、模组「读心大师」和文风「冷峻悬疑」。可以在「创作」中添加自己的内容。合规性审核 Agent 默认调用所分配的 AI；也可以在通用设置中切换为仓库内可编辑的固定响应。
 
 ## 本地数据和配置
 
@@ -52,7 +53,7 @@ cd RPera
 
 更改后重启 `./start.sh`。`lan_access: true` 会监听 `0.0.0.0`；如需设置访问密码，请同时将 `basic_auth.enabled` 改为 `true`，并填写用户名和密码。HTTP Basic 在普通 HTTP 下不会加密密码；跨不可信网络访问请使用 HTTPS。WSL2 下向局域网其他设备开放服务，可能还需在 Windows 配置端口转发和防火墙。
 
-开发者可以运行 `uv run pytest` 验证项目。源码使用 Python 3.12+、FastAPI、SQLite，以及少量原生 JavaScript。
+开发者可以运行 `uv run pytest` 验证服务端与公开 HTTP 闭环。后台 Markdown 渲染的源文件位于 `web/trace-markdown.js`；修改后在 `web/` 运行 `npm ci && npm run build:trace` 生成浏览器直接使用的 `web/static/trace-markdown.js`，并用 `npm test` 验证渲染。正常运行 RPera 不需要安装 Node.js。源码使用 Python 3.12+、FastAPI、SQLite，以及少量原生 JavaScript。
 
 ## 许可证
 

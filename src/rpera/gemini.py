@@ -5,6 +5,8 @@ import uuid
 from typing import Any
 
 from .message_compat import content_blocks, image_data_url, system_messages_as_user
+from .gemini_thinking import GeminiThinkingLevel, validate_gemini_thinking_level
+from .model_errors import CONTENT_BLOCK_REASONS, ModelFallbackError, is_content_block_error
 from .models import ModelResult, ToolCall
 
 
@@ -19,7 +21,10 @@ def request_payload(
     temperature: float,
     top_p: float,
     max_tokens: int,
+    model: str = "",
+    thinking_level: GeminiThinkingLevel | None = None,
 ) -> dict[str, Any]:
+    validate_gemini_thinking_level("google_gemini", model, thinking_level)
     payload: dict[str, Any] = {
         "contents": _contents(system_messages_as_user(messages)),
         "systemInstruction": {"parts": [{"text": system_prompt}]},
@@ -29,6 +34,8 @@ def request_payload(
             "maxOutputTokens": max_tokens,
         },
     }
+    if thinking_level is not None:
+        payload["generationConfig"]["thinkingConfig"] = {"thinkingLevel": thinking_level.upper()}
     declarations = [_function_declaration(tool) for tool in tools or []]
     if declarations:
         payload["tools"] = [{"functionDeclarations": declarations}]
@@ -84,6 +91,8 @@ def parse_stream(chunks: list[dict[str, Any]]) -> ModelResult:
         calls.extend(chunk_calls)
     if not saw_candidate:
         feedback = next((chunk.get("promptFeedback") for chunk in chunks if isinstance(chunk.get("promptFeedback"), dict)), None)
+        if isinstance(feedback, dict) and feedback.get("blockReason") in CONTENT_BLOCK_REASONS:
+            raise ModelFallbackError("content_blocked", f"Gemini 响应没有候选内容{_detail(feedback)}")
         raise RuntimeError(f"Gemini 响应没有候选内容{_detail(feedback)}")
     return ModelResult(
         content="".join(content_parts),
@@ -180,6 +189,9 @@ def _candidate(raw: dict[str, Any]) -> dict[str, Any]:
     _raise_for_error(raw)
     candidates = raw.get("candidates")
     if not isinstance(candidates, list) or not candidates or not isinstance(candidates[0], dict):
+        feedback = raw.get("promptFeedback")
+        if isinstance(feedback, dict) and feedback.get("blockReason") in CONTENT_BLOCK_REASONS:
+            raise ModelFallbackError("content_blocked", f"Gemini 响应没有候选内容{_detail(feedback)}")
         raise RuntimeError(f"Gemini 响应没有候选内容{_detail(raw.get('promptFeedback'))}")
     candidate = candidates[0]
     _raise_for_finish(candidate)
@@ -221,12 +233,16 @@ def _raise_for_finish(candidate: dict[str, Any]) -> None:
         return
     message = candidate.get("finishMessage")
     suffix = f"：{message}" if isinstance(message, str) and message else ""
+    if reason in CONTENT_BLOCK_REASONS:
+        raise ModelFallbackError("content_blocked", f"Gemini 生成已停止（{reason}）{suffix}")
     raise RuntimeError(f"Gemini 生成已停止（{reason}）{suffix}")
 
 
 def _raise_for_error(raw: dict[str, Any]) -> None:
     error = raw.get("error")
     if isinstance(error, dict):
+        if is_content_block_error(error):
+            raise ModelFallbackError("content_blocked", f"Gemini 接口返回错误：{json.dumps(error, ensure_ascii=False)}")
         raise RuntimeError(f"Gemini 接口返回错误：{json.dumps(error, ensure_ascii=False)}")
 
 

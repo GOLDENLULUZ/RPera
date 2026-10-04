@@ -194,8 +194,34 @@ main { width: min(1120px, calc(100% - 36px)); margin: 0 auto; }
 .event.turn-failed .event-action, .event.turn-interrupted .event-action, .event.tool-failed .event-action { color: var(--error); }
 .trace-section + .trace-section { margin-top: 14px; }
 .trace-section-title { margin-bottom: 4px; color: var(--dim); font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.08em; }
-.trace-text, .trace-data { margin: 0; color: #d0d0ca; white-space: pre-wrap; word-break: break-word; }
-.trace-data { padding: 10px 12px; overflow: auto; border-left: 2px solid var(--line); background: var(--panel); }
+.trace-text, .trace-data { margin: 0; color: #d0d0ca; white-space: pre-wrap; overflow-wrap: anywhere; }
+.trace-data { max-width: 100%; padding: 10px 12px; overflow: auto; border-left: 2px solid var(--line); background: var(--panel); }
+.trace-fields { min-width: 0; }
+.trace-fields > .trace-section { padding: 6px 0 6px 12px; border-left: 1px solid var(--line); }
+.trace-fields > .trace-section + .trace-section { margin-top: 8px; }
+.trace-fields > .trace-data { margin-top: 10px; }
+.trace-detail { margin: 8px 0; }
+.trace-detail summary { cursor: pointer; color: var(--dim); }
+.trace-detail > .trace-section { padding: 8px 0 0 12px; }
+.trace-markdown { white-space: normal; }
+.trace-markdown > :first-child { margin-top: 0; }
+.trace-markdown > :last-child { margin-bottom: 0; }
+.trace-markdown p, .trace-markdown ul, .trace-markdown ol, .trace-markdown blockquote { margin: 0 0 10px; }
+.trace-markdown ul, .trace-markdown ol { padding-left: 24px; }
+.trace-markdown li + li { margin-top: 4px; }
+.trace-markdown li > p { margin-bottom: 4px; }
+.trace-markdown h1, .trace-markdown h2, .trace-markdown h3, .trace-markdown h4 { margin: 14px 0 6px; color: var(--white); line-height: 1.4; }
+.trace-markdown h1 { font-size: 1.22em; }
+.trace-markdown h2 { font-size: 1.12em; }
+.trace-markdown h3, .trace-markdown h4 { font-size: 1em; }
+.trace-markdown blockquote { padding-left: 12px; border-left: 2px solid var(--strong-line); color: var(--dim); }
+.trace-markdown pre { max-width: 100%; margin: 8px 0; padding: 10px 12px; overflow: auto; background: var(--panel); border-left: 2px solid var(--line); white-space: pre; }
+.trace-markdown code { padding: 1px 3px; background: var(--panel); font: inherit; overflow-wrap: anywhere; }
+.trace-markdown pre code { padding: 0; white-space: inherit; overflow-wrap: normal; }
+.trace-markdown a { color: var(--white); text-decoration: underline; }
+.trace-markdown table { display: block; max-width: 100%; margin: 8px 0; overflow-x: auto; border-collapse: collapse; }
+.trace-markdown th, .trace-markdown td { padding: 4px 8px; border: 1px solid var(--line); }
+.trace-markdown hr { border: 0; border-top: 1px solid var(--line); }
 .trace-reference-list { margin: 0; padding-left: 18px; }
 .trace-reference-list li + li { margin-top: 4px; }
 .trace-result > .trace-section + .trace-section { padding-top: 14px; border-top: 1px solid var(--line); }
@@ -248,7 +274,8 @@ main { width: min(1120px, calc(100% - 36px)); margin: 0 auto; }
 .drawing-test { display: grid; gap: 14px; padding: 24px 28px 32px; border-bottom: 1px solid var(--strong-line); }
 .drawing-test p { margin: 0; }
 .drawing-test-image { max-width: 100%; max-height: 640px; border: 1px solid var(--strong-line); image-rendering: auto; }
-.capability-layout .preset-item { cursor: default; }
+.capability-editor-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 24px; grid-column: 1 / -1; }
+.capability-editor-fields p { margin: 0; }
 
 .creation-page { padding: 48px 0; }
 .creation-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding-bottom: 20px; border-bottom: 1px solid var(--strong-line); }
@@ -351,6 +378,7 @@ main { width: min(1120px, calc(100% - 36px)); margin: 0 auto; }
     .settings-page-head { align-items: flex-start; flex-direction: column; }
     .settings-section-nav { width: 100%; }
     .capability-layout .inline-input { grid-template-columns: 1fr; }
+    .capability-editor-fields { grid-template-columns: 1fr; }
     .advanced-settings-grid { grid-template-columns: 1fr; }
     .drawing-test { padding: 20px 0 28px; }
     .workspace-head { align-items: flex-start; flex-direction: column; gap: 6px; }

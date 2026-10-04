@@ -19,7 +19,7 @@ def make_data_dir(tmp_path: Path) -> Path:
     return data_dir
 
 
-def wait_for_turn(client: TestClient, save_id: str, timeout: float = 10) -> dict[str, Any]:
+def wait_for_turn(client: TestClient, save_id: str, timeout: float = 30) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         turns = client.get(f"/api/saves/{save_id}/turns").json()

@@ -63,7 +63,7 @@ class NarrativeFileClient:
         tools: list[dict[str, Any]] | None = None,
     ) -> ModelResult:
         tool_names = {item["function"]["name"] for item in tools or []}
-        core_tools = tool_names - {"story_summary_read"}
+        core_tools = tool_names - {"story_summary_read", "entity_read", "report_read"}
         results = [message for message in messages if message["role"] == "tool"]
         if system_prompt == COORDINATOR_PROMPT:
             assert core_tools == {"task", "file_read", "narrative_publish"}
@@ -75,7 +75,7 @@ class NarrativeFileClient:
                 return self.result(call=ToolCall(id="same", name="file_read", arguments={"path": "narrative.md"}))
             return self.result(call=ToolCall(id="same", name="narrative_publish", arguments={"path": "narrative.md"}))
         if system_prompt == WORLD_RESEARCHER_PROMPT:
-            assert core_tools == {"entity_search", "entity_read", "research_report"}
+            assert core_tools == {"entity_search", "research_report"}
             if not results:
                 return self.result(call=ToolCall(id="same", name="entity_search", arguments={"query": "暮潮旅店"}))
             return self.result(call=ToolCall(id="report", name="research_report", arguments={"report": "暮潮旅店是当地消息汇集处。", "related_entities": []}))
@@ -183,7 +183,7 @@ def test_retry_removes_trailing_coordinator_reply_without_tool_call(tmp_path: Pa
 
 @pytest.mark.parametrize(
     ("disabled_agents", "expected_agent"),
-    [([], "story_summarizer"), (["story_summarizer"], "world_researcher")],
+    [([], "compliance_reviewer"), (["compliance_reviewer"], "story_summarizer")],
 )
 def test_force_start_delegation_removes_plain_reply_from_real_chat(
     tmp_path: Path,
@@ -496,9 +496,9 @@ def test_role_report_receives_disclosed_entities_and_remains_distinct_in_narrato
                     return self.result(call=ToolCall(id="read-entity", name="entity_read", arguments={"paths": [character_path]}))
                 return self.result(call=ToolCall(id="research-report", name="research_report", arguments={"report": "伊蕾寡言、警惕并保守秘密。", "related_entities": [character_path]}))
             if system_prompt == ROLE_PLAYER_PROMPT:
-                assert {item["function"]["name"] for item in tools or []} == {"story_summary_read"}
+                assert {item["function"]["name"] for item in tools or []} == {"entity_read", "report_read", "story_summary_read", "role_report"}
                 self.role_input = json.loads(messages[1]["content"])
-                return self.result("伊蕾会先观察玩家的诚意，准备含糊回应，不主动提及封蜡信。")
+                return self.result(call=ToolCall(id="role-report", name="role_report", arguments={"report": "伊蕾会先观察玩家的诚意，准备含糊回应，不主动提及封蜡信。"}))
             if system_prompt == STYLE_PLANNER_PROMPT:
                 self.style_input = json.loads(messages[1]["content"])
                 return self.result(call=ToolCall(id="style-report", name="style_report", arguments={"report": "本回合没有合适的全局文风，保持克制。", "style_paths": []}))
@@ -585,10 +585,10 @@ def test_forced_reports_merge_with_explicit_refs_and_skip_same_child_history(tmp
                 latest_user = json.loads(next(message["content"] for message in reversed(messages) if message["role"] == "user"))
                 if latest_user.get("continuation"):
                     self.role_continuation_input = latest_user
-                    return self.result("角色报告甲修订版")
+                    return self.result(call=ToolCall(id="role-revised", name="role_report", arguments={"report": "角色报告甲修订版"}))
                 initial = json.loads(messages[1]["content"])
                 self.role_initial_inputs.append(initial)
-                return self.result("角色报告甲" if initial["task"]["task"].endswith("甲") else "角色报告乙")
+                return self.result(call=ToolCall(id="role-report", name="role_report", arguments={"report": "角色报告甲" if initial["task"]["task"].endswith("甲") else "角色报告乙"}))
             if system_prompt == NARRATOR_PROMPT:
                 self.narrator_input = json.loads(messages[1]["content"])
                 if not results:
@@ -660,7 +660,13 @@ def test_later_delegation_requires_each_earliest_missing_report(tmp_path: Path) 
                 return self.result(call=ToolCall(id="publish", name="narrative_publish", arguments={"path": "narrative.md"}))
             if system_prompt == ROLE_PLAYER_PROMPT:
                 self.role_input = json.loads(messages[1]["content"])
-                return self.result("角色报告")
+                return self.result(call=ToolCall(id="role-report", name="role_report", arguments={"report": "角色报告"}))
+            if system_prompt == COMPLIANCE_REVIEWER_PROMPT:
+                return self.result(call=ToolCall(
+                    id="compliance-report",
+                    name="compliance_report",
+                    arguments={"approved": True, "reason": "审核通过"},
+                ))
             if system_prompt == NARRATOR_PROMPT:
                 self.narrator_input = json.loads(messages[1]["content"])
             return await super().complete(system_prompt, messages, tools)
@@ -712,7 +718,7 @@ def test_disabling_report_source_before_retry_stops_attachment_and_gate(tmp_path
                     return self.result(call=ToolCall(id="narrator", name="task", arguments={"agent": "narrator", "task": "写故事"}))
                 return self.result(call=ToolCall(id="publish", name="narrative_publish", arguments={"path": "narrative.md"}))
             if system_prompt == ROLE_PLAYER_PROMPT:
-                return self.result("不应在禁用后的重试中附加")
+                return self.result(call=ToolCall(id="role-report", name="role_report", arguments={"report": "不应在禁用后的重试中附加"}))
             if system_prompt == NARRATOR_PROMPT:
                 self.narrator_input = json.loads(messages[1]["content"])
             return await super().complete(system_prompt, messages, tools)
@@ -759,7 +765,7 @@ def test_report_name_error_can_be_corrected_without_creating_a_child(tmp_path: P
                     return self.result(call=ToolCall(id="correct-ref", name="task", arguments={"agent": "narrator", "task": "依据随附报告写故事。", "report_refs": [results[0]["report_ref"]]}))
                 return self.result(call=ToolCall(id="publish", name="narrative_publish", arguments={"path": "narrative.md"}))
             if system_prompt == ROLE_PLAYER_PROMPT:
-                return self.result(report)
+                return self.result(call=ToolCall(id="role-report", name="role_report", arguments={"report": report}))
             if system_prompt == NARRATOR_PROMPT:
                 self.narrator_input = json.loads(messages[1]["content"])
                 if not results:
@@ -801,7 +807,7 @@ def test_required_entities_automatically_reach_all_transfer_receivers_without_re
                 if len(results) == 1:
                     return self.result(call=ToolCall(id="role", name="task", arguments={"agent": "role_player", "task": "扮演伊蕾并报告反应"}))
                 if len(results) == 2:
-                    return self.result(call=ToolCall(id="style", name="task", arguments={"agent": "style_planner", "task": f"根据角色意见选择文风：{results[1]['result']}"}))
+                    return self.result(call=ToolCall(id="style", name="task", arguments={"agent": "style_planner", "task": f"根据角色意见选择文风：{results[1]['result']['report']}"}))
                 if len(results) == 3:
                     task = """【本回合叙事目标】\n写出伊蕾的回应。\n【世界探索 Agent 意见】\n本回合未调用。\n【角色扮演 Agent 意见】\n伊蕾保持警惕。\n【文风 Agent 意见】\n本回合没有合适的全局文风。\n【其他叙事约束】\n不得替玩家行动。"""
                     return self.result(call=ToolCall(id="narrator", name="task", arguments={"agent": "narrator", "task": task}))
@@ -810,10 +816,10 @@ def test_required_entities_automatically_reach_all_transfer_receivers_without_re
                 return self.result(call=ToolCall(id="publish", name="narrative_publish", arguments={"path": "narrative.md"}))
             if system_prompt == EROTIC_OR_NOT_PROMPT:
                 self.inputs["EroticOrNot"] = json.loads(messages[1]["content"])
-                return self.result("文本化意见")
+                return self.result(call=ToolCall(id="erotic-report", name="erotic_report", arguments={"report": "文本化意见"}))
             if system_prompt == ROLE_PLAYER_PROMPT:
                 self.inputs["role_player"] = json.loads(messages[1]["content"])
-                return self.result("伊蕾保持警惕，准备先观察玩家。")
+                return self.result(call=ToolCall(id="role-report", name="role_report", arguments={"report": "伊蕾保持警惕，准备先观察玩家。"}))
             if system_prompt == STYLE_PLANNER_PROMPT:
                 self.inputs["style_planner"] = json.loads(messages[1]["content"])
                 return self.result(call=ToolCall(id="style-report", name="style_report", arguments={"report": "本回合没有合适的全局文风。", "style_paths": []}))
@@ -835,6 +841,47 @@ def test_required_entities_automatically_reach_all_transfer_receivers_without_re
     for initial in model.inputs.values():
         assert initial["task"]["related_entities"] == [required_path]
         assert [document["path"] for document in initial["related_entity_documents"]] == [required_path]
+    with app.state.saves.connect(save["id"]) as db:
+        rows = db.execute(
+            "SELECT tool_name, input, output FROM parts WHERE tool_name IN ('erotic_report', 'role_report') ORDER BY rowid"
+        ).fetchall()
+    assert [row["tool_name"] for row in rows] == ["erotic_report", "role_report"]
+    assert [json.loads(row["input"]) for row in rows] == [
+        {"report": "文本化意见"},
+        {"report": "伊蕾保持警惕，准备先观察玩家。"},
+    ]
+    assert [json.loads(row["output"]) for row in rows] == [json.loads(row["input"]) for row in rows]
+
+
+@pytest.mark.parametrize(("agent", "prompt", "tool_name"), [
+    ("EroticOrNot", EROTIC_OR_NOT_PROMPT, "erotic_report"),
+    ("role_player", ROLE_PLAYER_PROMPT, "role_report"),
+])
+def test_text_report_agents_require_their_report_tool(
+    tmp_path: Path, agent: str, prompt: str, tool_name: str
+) -> None:
+    class PlainTextClient(NarrativeFileClient):
+        async def complete(self, system_prompt: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> ModelResult:
+            results = [json.loads(message["content"]) for message in messages if message["role"] == "tool"]
+            if system_prompt == COORDINATOR_PROMPT:
+                assert not results
+                return self.result(call=ToolCall(id="child", name="task", arguments={"agent": agent, "task": "提交报告"}))
+            assert system_prompt == prompt
+            assert tool_name in {item["function"]["name"] for item in tools or []}
+            return self.result("仅返回普通文本")
+
+    app = create_app(data_dir=make_data_dir(tmp_path), model_client=PlainTextClient())
+    with TestClient(app) as client:
+        save = client.post("/api/saves", json={"world_name": "雾港", "name": "报告工具门禁"}).json()
+        client.post(f"/api/saves/{save['id']}/turns", json={"content": "继续。"})
+        turn = wait_for_turn(client, save["id"])
+    assert turn["status"] == "failed"
+    failed = next(event for event in app.state.saves.list_events(save["id"]) if event.type == "turn.failed")
+    assert f"必须提交 {tool_name}" in failed.payload["message"]
+    with app.state.saves.connect(save["id"]) as db:
+        task = db.execute("SELECT state, output FROM parts WHERE tool_name = 'task'").fetchone()
+    assert task["state"] == "error"
+    assert "report_ref" not in json.loads(task["output"])
 
 
 def test_single_file_tools_reject_unsafe_files_and_edit_exactly_once(tmp_path: Path) -> None:
@@ -919,7 +966,7 @@ def test_success_resets_failures_and_multi_tool_rejection_counts_once(tmp_path: 
 
         async def complete(self, system_prompt: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> ModelResult:
             if system_prompt == ROLE_PLAYER_PROMPT:
-                return self.result("角色报告")
+                return self.result(call=ToolCall(id="role-report", name="role_report", arguments={"report": "角色报告"}))
             if system_prompt != COORDINATOR_PROMPT:
                 return await super().complete(system_prompt, messages, tools)
             step = self.root_step
@@ -969,7 +1016,7 @@ def test_more_than_thirty_two_successful_tools_can_complete(tmp_path: Path) -> N
     with TestClient(app) as client:
         save = client.post("/api/saves", json={"world_name": "雾港", "name": "长成功工具链"}).json()
         client.post(f"/api/saves/{save['id']}/turns", json={"content": "继续。"})
-        assert wait_for_turn(client, save["id"])["narrative"] == STORY
+        assert wait_for_turn(client, save["id"], timeout=120)["narrative"] == STORY
 
     assert model.searches == 33
 
@@ -993,7 +1040,7 @@ def test_delegation_budget_rejects_only_the_extra_child_task(tmp_path: Path) -> 
                 return self.result(call=ToolCall(id="publish", name="narrative_publish", arguments={"path": "narrative.md"}))
             if system_prompt == ROLE_PLAYER_PROMPT:
                 self.role_calls += 1
-                return self.result(content="角色报告")
+                return self.result(call=ToolCall(id="role-report", name="role_report", arguments={"report": "角色报告"}))
             return await super().complete(system_prompt, messages, tools)
 
     model = BudgetClient()
@@ -1043,7 +1090,7 @@ def test_disabled_agent_is_omitted_rejected_and_does_not_block_narration(tmp_pat
     with TestClient(app) as client:
         assert client.put(
             "/api/runtime-settings",
-            json={"max_delegations": 20, "context_turns": 4, "disabled_agents": ["story_summarizer", "world_researcher", "character_designer", "location_designer", "compliance_reviewer", "EroticOrNot", "role_player", "style_planner", "consistency_checker"], "blocked_instruction_agents": [], "always_attach_report_agents": ["role_player"]},
+            json={"max_delegations": 20, "context_turns": 4, "disabled_agents": ["story_summarizer", "world_researcher", "character_designer", "location_designer", "compliance_reviewer", "EroticOrNot", "goal_keeper", "role_player", "style_planner", "consistency_checker"], "blocked_instruction_agents": [], "always_attach_report_agents": ["role_player"]},
         ).status_code == 200
         save = client.post("/api/saves", json={"world_name": "雾港", "name": "禁用辅助 Agent"}).json()
         client.post(f"/api/saves/{save['id']}/turns", json={"content": "继续。"})
@@ -1108,7 +1155,7 @@ def test_compliance_reviewer_uses_fixed_response_without_model_call_and_passes_r
                 return self.result(call=ToolCall(id="publish", name="narrative_publish", arguments={"path": "narrative.md"}))
             if system_prompt == ROLE_PLAYER_PROMPT:
                 self.role_payload = json.loads(messages[1]["content"])
-                return self.result(content="角色报告")
+                return self.result(call=ToolCall(id="role-report", name="role_report", arguments={"report": "角色报告"}))
             if system_prompt == COMPLIANCE_REVIEWER_PROMPT:
                 raise AssertionError("合规性审核 Agent 不应调用模型客户端")
             return await super().complete(system_prompt, messages, tools)
@@ -1128,7 +1175,7 @@ def test_compliance_reviewer_uses_fixed_response_without_model_call_and_passes_r
     with TestClient(app) as client:
         assert client.put(
             "/api/runtime-settings",
-            json={"max_delegations": 20, "context_turns": 4, "disabled_agents": [], "prefill_agents": ["compliance_reviewer"], "blocked_instruction_agents": []},
+            json={"max_delegations": 20, "context_turns": 4, "disabled_agents": [], "prefill_agents": ["compliance_reviewer"], "blocked_instruction_agents": [], "use_compliance_fixed_response": True},
         ).status_code == 200
         save = client.post("/api/saves", json={"world_name": "雾港", "name": "固定审核响应"}).json()
         client.post(f"/api/saves/{save['id']}/turns", json={"content": "继续。"})
@@ -1157,6 +1204,58 @@ def test_compliance_reviewer_uses_fixed_response_without_model_call_and_passes_r
     assert json.loads(assistant["model"])["response_source"] == "fixed_file"
     fixed_text = next(part["content"] for part in assistant["parts"] if part["type"] == "text")
     assert json.loads(fixed_text) == {"approved": approved, "reason": reason}
+
+
+def test_compliance_reviewer_uses_ai_by_default_and_submits_structured_report(tmp_path: Path) -> None:
+    class AiComplianceClient(NarrativeFileClient):
+        def __init__(self) -> None:
+            self.compliance_tools: set[str] = set()
+            self.report: dict[str, Any] | None = None
+
+        async def complete(self, system_prompt: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> ModelResult:
+            results = [json.loads(message["content"]) for message in messages if message["role"] == "tool"]
+            if system_prompt == COORDINATOR_PROMPT:
+                if not results:
+                    return self.result(call=ToolCall(
+                        id="compliance",
+                        name="task",
+                        arguments={"agent": "compliance_reviewer", "task": "审核本回合叙事方向"},
+                    ))
+                if len(results) == 1:
+                    self.report = results[0]["result"]
+                    return self.result(call=ToolCall(
+                        id="narrator",
+                        name="task",
+                        arguments={"agent": "narrator", "task": "写故事"},
+                    ))
+                if len(results) == 2:
+                    return self.result(call=ToolCall(id="read", name="file_read", arguments={"path": "narrative.md"}))
+                return self.result(call=ToolCall(id="publish", name="narrative_publish", arguments={"path": "narrative.md"}))
+            if system_prompt == COMPLIANCE_REVIEWER_PROMPT:
+                self.compliance_tools = {item["function"]["name"] for item in tools or []}
+                return self.result(call=ToolCall(
+                    id="report",
+                    name="compliance_report",
+                    arguments={"approved": False, "reason": "交由主代理决定"},
+                ))
+            return await super().complete(system_prompt, messages, tools)
+
+    model = AiComplianceClient()
+    app = create_app(data_dir=make_data_dir(tmp_path), model_client=model)
+    with TestClient(app) as client:
+        save = client.post("/api/saves", json={"world_name": "雾港", "name": "AI 合规审核"}).json()
+        client.post(f"/api/saves/{save['id']}/turns", json={"content": "继续。"})
+        turn = wait_for_turn(client, save["id"])
+
+    assert turn["status"] == "completed"
+    assert model.compliance_tools == {"entity_read", "report_read", "compliance_report", "story_summary_read"}
+    assert model.report == {"approved": False, "reason": "交由主代理决定"}
+    events = app.state.saves.list_events(save["id"])
+    assert any(
+        event.type == "model.request" and event.payload.get("agent") == "compliance_reviewer"
+        for event in events
+    )
+    assert not any(event.type == "agent.fixed_response" for event in events)
 
 
 def test_retry_uses_current_disabled_agents(tmp_path: Path) -> None:
@@ -1946,6 +2045,9 @@ sys.path.insert(0, str(Path.cwd() / "tests"))
 from fastapi.testclient import TestClient
 from rpera.app import create_app
 from test_runtime_batch_one import NarrativeFileClient, STORY
+from conftest import install_scripted_model_projection
+from pytest import MonkeyPatch
+install_scripted_model_projection(MonkeyPatch())
 
 data, marker, identifiers = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 app = create_app(data_dir=data, model_client=NarrativeFileClient())
@@ -2020,6 +2122,9 @@ from fastapi.testclient import TestClient
 from rpera.app import create_app
 from rpera.draft_files import DraftFileStore
 from test_runtime_batch_one import NarrativeFileClient
+from conftest import install_scripted_model_projection
+from pytest import MonkeyPatch
+install_scripted_model_projection(MonkeyPatch())
 
 data, marker, identifiers = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 app = create_app(data_dir=data, model_client=NarrativeFileClient())
@@ -2411,7 +2516,7 @@ def test_checker_can_report_narrator_revision_and_recheck_before_publication(tmp
                     return self.result(call=ToolCall(id="write", name="file_write", arguments={"path": "narrative.md", "content": "rough"}))
                 return self.result("初稿已完成。")
             if system_prompt == CONSISTENCY_CHECKER_PROMPT:
-                assert {item["function"]["name"] for item in tools or []} == {"file_read", "story_summary_read"}
+                assert {item["function"]["name"] for item in tools or []} == {"entity_read", "report_read", "file_read", "story_summary_read"}
                 latest_user = json.loads(next(message["content"] for message in reversed(messages) if message["role"] == "user"))
                 if messages[-1]["role"] == "user":
                     if not latest_user.get("continuation"):

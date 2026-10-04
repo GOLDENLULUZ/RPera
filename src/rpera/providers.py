@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Protocol
 from urllib.parse import urlencode
 
@@ -15,8 +16,12 @@ from .gemini import parse_response as parse_gemini_response
 from .gemini import parse_stream as parse_gemini_stream
 from .gemini import request_payload as gemini_request_payload
 from .message_compat import content_blocks
+from .model_errors import ModelFallbackError, is_content_block_error
 from .models import AiPreset, ModelOption, ModelResult, NetworkSettings, ToolCall
 from .network import async_client_options
+from .openai_responses import parse_response as parse_openai_responses_response
+from .openai_responses import parse_stream as parse_openai_responses_stream
+from .openai_responses import request_payload as openai_responses_request_payload
 from .xai import parse_response as parse_xai_response
 from .xai import parse_stream as parse_xai_stream
 from .xai import request_payload as xai_request_payload
@@ -32,6 +37,24 @@ class ModelClient(Protocol):
     async def complete(self, system_prompt: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> ModelResult: ...
 
 
+class FallbackModelClient:
+    def __init__(self, primary: BoundModelClient, fallback: BoundModelClient) -> None:
+        self.primary = primary
+        self.fallback = fallback
+
+    def bind(self) -> ModelClient:
+        return self
+
+    def bind_for_agents(self, names: tuple[str, ...]) -> dict[str, ModelClient]:
+        return {name: self for name in names}
+
+    def metadata(self) -> dict[str, str | int | float]:
+        return self.primary.metadata()
+
+    async def complete(self, system_prompt: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> ModelResult:
+        return await self.primary.complete(system_prompt, messages, tools)
+
+
 class ConfiguredModelClient:
     def __init__(self, presets: PresetStore, network_settings: NetworkSettingsStore | None = None) -> None:
         self.presets = presets
@@ -40,8 +63,11 @@ class ConfiguredModelClient:
     def bind_for_agents(self, names: tuple[str, ...] = agent_names()) -> dict[str, ModelClient]:
         network = self.network_settings.get() if self.network_settings else NetworkSettings()
         return {
-            name: BoundModelClient(preset, network_settings=network, streaming=streaming)
-            for name, (preset, streaming) in self.presets.resolve_with_streaming(names).items()
+            name: FallbackModelClient(
+                BoundModelClient(preset, network_settings=network, streaming=streaming),
+                BoundModelClient(fallback, network_settings=network, streaming=streaming),
+            ) if fallback else BoundModelClient(preset, network_settings=network, streaming=streaming)
+            for name, (preset, fallback, streaming) in self.presets.resolve_with_fallback(names).items()
         }
 
     def bind(self) -> ModelClient:
@@ -74,19 +100,23 @@ class BoundModelClient:
         return self
 
     def metadata(self) -> dict[str, str | int | float]:
-        return {
+        metadata: dict[str, str | int | float] = {
             "preset_id": self.preset.id,
             "preset_name": self.preset.name,
             "provider": self.preset.provider,
             "base_url": self.preset.base_url,
             "model": self.preset.model,
             "xai_protocol": self.preset.xai_protocol,
+            "openai_protocol": self.preset.openai_protocol,
             "timeout_seconds": self.preset.timeout_seconds,
             "temperature": self.preset.temperature,
             "top_p": self.preset.top_p,
             "max_tokens": self.preset.max_tokens,
             "streaming": self.streaming,
         }
+        if self.preset.thinking_level is not None:
+            metadata["thinking_level"] = self.preset.thinking_level
+        return metadata
 
     async def complete(self, system_prompt: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> ModelResult:
         preset = self.preset
@@ -122,6 +152,19 @@ class BoundModelClient:
                 events = await self._request_native_stream("responses", payload, "xAI")
                 return parse_xai_stream(events)
             return parse_xai_response(await self._request_json("POST", "responses", payload))
+        if preset.provider == "openai_compatible" and preset.openai_protocol == "responses":
+            payload = openai_responses_request_payload(
+                system_prompt,
+                messages,
+                tools,
+                model=preset.model,
+                max_tokens=preset.max_tokens,
+                stream=self.streaming,
+            )
+            if self.streaming:
+                events = await self._request_native_stream("responses", payload, "OpenAI Responses")
+                return parse_openai_responses_stream(events)
+            return parse_openai_responses_response(await self._request_json("POST", "responses", payload))
         if preset.provider == "google_gemini":
             payload = gemini_request_payload(
                 system_prompt,
@@ -130,6 +173,8 @@ class BoundModelClient:
                 temperature=preset.temperature,
                 top_p=preset.top_p,
                 max_tokens=preset.max_tokens,
+                model=preset.model,
+                thinking_level=preset.thinking_level,
             )
             if self.streaming:
                 return await self._request_gemini_stream(payload)
@@ -191,7 +236,7 @@ class BoundModelClient:
             raise RuntimeError("模型接口响应的 message.content 不是字符串")
         refusal = message.get("refusal")
         if isinstance(refusal, str) and refusal:
-            raise RuntimeError(f"模型拒绝生成：{refusal}")
+            raise ModelFallbackError("content_blocked", f"模型拒绝生成：{refusal}")
         reasoning = message.get("reasoning_content") or message.get("reasoning")
         if reasoning is not None and not isinstance(reasoning, str):
             reasoning = json.dumps(reasoning, ensure_ascii=False)
@@ -271,18 +316,17 @@ class BoundModelClient:
                                     if isinstance(function.get("arguments"), str):
                                         part["arguments"] += function["arguments"]
         except httpx.HTTPStatusError as error:
-            detail = self._safe_error(error.response.text)
-            raise RuntimeError(f"模型接口返回 HTTP {error.response.status_code}: {detail}") from error
+            raise self._status_error(error.response) from error
         except httpx.ReadTimeout as error:
-            raise RuntimeError(f"等待模型响应超时（{self.preset.timeout_seconds} 秒）") from error
+            raise ModelFallbackError("temporarily_unavailable", f"等待模型响应超时（{self.preset.timeout_seconds} 秒）") from error
         except httpx.ConnectTimeout as error:
-            raise RuntimeError(f"连接模型接口超时（{self.preset.timeout_seconds} 秒）") from error
+            raise ModelFallbackError("temporarily_unavailable", f"连接模型接口超时（{self.preset.timeout_seconds} 秒）") from error
         except httpx.WriteTimeout as error:
-            raise RuntimeError(f"发送模型请求超时（{self.preset.timeout_seconds} 秒）") from error
+            raise ModelFallbackError("temporarily_unavailable", f"发送模型请求超时（{self.preset.timeout_seconds} 秒）") from error
         except httpx.PoolTimeout as error:
-            raise RuntimeError(f"等待模型连接池超时（{self.preset.timeout_seconds} 秒）") from error
+            raise ModelFallbackError("temporarily_unavailable", f"等待模型连接池超时（{self.preset.timeout_seconds} 秒）") from error
         except httpx.ConnectError as error:
-            raise RuntimeError(f"无法建立模型连接：{self._safe_error(str(error)) or type(error).__name__}") from error
+            raise ModelFallbackError("temporarily_unavailable", f"无法建立模型连接：{self._safe_error(str(error)) or type(error).__name__}") from error
         except httpx.HTTPError as error:
             raise RuntimeError(f"模型接口通信失败：{self._safe_error(str(error)) or type(error).__name__}") from error
         if not done:
@@ -326,18 +370,17 @@ class BoundModelClient:
                             raise RuntimeError("Gemini 接口返回了非对象的流式分片")
                         chunks.append(chunk)
         except httpx.HTTPStatusError as error:
-            detail = self._safe_error(error.response.text)
-            raise RuntimeError(f"模型接口返回 HTTP {error.response.status_code}: {detail}") from error
+            raise self._status_error(error.response) from error
         except httpx.ReadTimeout as error:
-            raise RuntimeError(f"等待模型响应超时（{self.preset.timeout_seconds} 秒）") from error
+            raise ModelFallbackError("temporarily_unavailable", f"等待模型响应超时（{self.preset.timeout_seconds} 秒）") from error
         except httpx.ConnectTimeout as error:
-            raise RuntimeError(f"连接模型接口超时（{self.preset.timeout_seconds} 秒）") from error
+            raise ModelFallbackError("temporarily_unavailable", f"连接模型接口超时（{self.preset.timeout_seconds} 秒）") from error
         except httpx.WriteTimeout as error:
-            raise RuntimeError(f"发送模型请求超时（{self.preset.timeout_seconds} 秒）") from error
+            raise ModelFallbackError("temporarily_unavailable", f"发送模型请求超时（{self.preset.timeout_seconds} 秒）") from error
         except httpx.PoolTimeout as error:
-            raise RuntimeError(f"等待模型连接池超时（{self.preset.timeout_seconds} 秒）") from error
+            raise ModelFallbackError("temporarily_unavailable", f"等待模型连接池超时（{self.preset.timeout_seconds} 秒）") from error
         except httpx.ConnectError as error:
-            raise RuntimeError(f"无法建立模型连接：{self._safe_error(str(error)) or type(error).__name__}") from error
+            raise ModelFallbackError("temporarily_unavailable", f"无法建立模型连接：{self._safe_error(str(error)) or type(error).__name__}") from error
         except httpx.HTTPError as error:
             raise RuntimeError(f"模型接口通信失败：{self._safe_error(str(error)) or type(error).__name__}") from error
         return parse_gemini_stream(chunks)
@@ -378,18 +421,17 @@ class BoundModelClient:
                             raise RuntimeError(f"{provider_name} 接口返回了非对象的流式事件")
                         events.append(event)
         except httpx.HTTPStatusError as error:
-            detail = self._safe_error(error.response.text)
-            raise RuntimeError(f"模型接口返回 HTTP {error.response.status_code}: {detail}") from error
+            raise self._status_error(error.response) from error
         except httpx.ReadTimeout as error:
-            raise RuntimeError(f"等待模型响应超时（{self.preset.timeout_seconds} 秒）") from error
+            raise ModelFallbackError("temporarily_unavailable", f"等待模型响应超时（{self.preset.timeout_seconds} 秒）") from error
         except httpx.ConnectTimeout as error:
-            raise RuntimeError(f"连接模型接口超时（{self.preset.timeout_seconds} 秒）") from error
+            raise ModelFallbackError("temporarily_unavailable", f"连接模型接口超时（{self.preset.timeout_seconds} 秒）") from error
         except httpx.WriteTimeout as error:
-            raise RuntimeError(f"发送模型请求超时（{self.preset.timeout_seconds} 秒）") from error
+            raise ModelFallbackError("temporarily_unavailable", f"发送模型请求超时（{self.preset.timeout_seconds} 秒）") from error
         except httpx.PoolTimeout as error:
-            raise RuntimeError(f"等待模型连接池超时（{self.preset.timeout_seconds} 秒）") from error
+            raise ModelFallbackError("temporarily_unavailable", f"等待模型连接池超时（{self.preset.timeout_seconds} 秒）") from error
         except httpx.ConnectError as error:
-            raise RuntimeError(f"无法建立模型连接：{self._safe_error(str(error)) or type(error).__name__}") from error
+            raise ModelFallbackError("temporarily_unavailable", f"无法建立模型连接：{self._safe_error(str(error)) or type(error).__name__}") from error
         except httpx.HTTPError as error:
             raise RuntimeError(f"模型接口通信失败：{self._safe_error(str(error)) or type(error).__name__}") from error
         return events
@@ -478,6 +520,8 @@ class BoundModelClient:
     async def test_connection(self) -> ModelResult:
         needs_reasoning_room = self.preset.provider in {"google_gemini", "anthropic"} or (
             self.preset.provider == "xai" and self.preset.xai_protocol == "responses"
+        ) or (
+            self.preset.provider == "openai_compatible" and self.preset.openai_protocol == "responses"
         )
         max_tokens = min(256, self.preset.max_tokens) if needs_reasoning_room else min(8, self.preset.max_tokens)
         client = BoundModelClient(
@@ -514,12 +558,57 @@ class BoundModelClient:
         }
 
     def _safe_error(self, detail: str) -> str:
-        safe = detail[:4000]
+        safe = detail
         if self.preset.api_key:
             safe = safe.replace(self.preset.api_key, "***")
         if self.network_settings.proxy_password:
             safe = safe.replace(self.network_settings.proxy_password, "***")
-        return safe
+        safe = " ".join(safe.split())
+        return safe[:500] + "…" if len(safe) > 500 else safe
+
+    def _http_error(self, response: httpx.Response) -> str:
+        body = response.text.strip()
+        content_type = response.headers.get("content-type", "").lower()
+        if "text/html" in content_type or re.match(r"(?is)\s*(?:<!doctype html|<html\b)", body):
+            if "cloudflare" in body.lower():
+                detail = "Cloudflare Tunnel 错误（1033）" if re.search(r"\b1033\b", body) else "Cloudflare 错误页面"
+                ray = re.search(r"Ray ID:\s*([a-zA-Z0-9]+)", body, re.IGNORECASE)
+                if ray:
+                    detail += f"；Ray ID：{ray.group(1)}"
+            else:
+                detail = "接口返回了 HTML 错误页面"
+        else:
+            detail = body
+            if body.startswith("{"):
+                try:
+                    data = json.loads(body)
+                except ValueError:
+                    pass
+                else:
+                    if isinstance(data, dict):
+                        error = data.get("error")
+                        if isinstance(error, dict):
+                            message = error.get("message")
+                            code = error.get("code")
+                            if isinstance(message, str) and message.strip():
+                                detail = f"{code}: {message}" if isinstance(code, str) and code and code not in message else message
+                        elif isinstance(error, str) and error.strip():
+                            detail = error
+            detail = self._safe_error(detail) or "接口未提供错误详情"
+        return f"模型接口返回 HTTP {response.status_code}: {detail}"
+
+    def _status_error(self, response: httpx.Response) -> RuntimeError:
+        message = self._http_error(response)
+        if response.status_code in {408, 429} or response.status_code >= 500:
+            return ModelFallbackError("temporarily_unavailable", message)
+        try:
+            body = response.json()
+        except ValueError:
+            return RuntimeError(message)
+        error = body.get("error") if isinstance(body, dict) else None
+        if isinstance(error, dict) and is_content_block_error(error):
+            return ModelFallbackError("content_blocked", message)
+        return RuntimeError(message)
 
     async def _request_json(
         self,
@@ -541,20 +630,17 @@ class BoundModelClient:
                 )
             response.raise_for_status()
         except httpx.HTTPStatusError as error:
-            detail = self._safe_error(error.response.text)
-            raise RuntimeError(
-                f"模型接口返回 HTTP {error.response.status_code}: {detail}"
-            ) from error
+            raise self._status_error(error.response) from error
         except httpx.ReadTimeout as error:
-            raise RuntimeError(f"等待模型响应超时（{timeout} 秒）") from error
+            raise ModelFallbackError("temporarily_unavailable", f"等待模型响应超时（{timeout} 秒）") from error
         except httpx.ConnectTimeout as error:
-            raise RuntimeError(f"连接模型接口超时（{timeout} 秒）") from error
+            raise ModelFallbackError("temporarily_unavailable", f"连接模型接口超时（{timeout} 秒）") from error
         except httpx.WriteTimeout as error:
-            raise RuntimeError(f"发送模型请求超时（{timeout} 秒）") from error
+            raise ModelFallbackError("temporarily_unavailable", f"发送模型请求超时（{timeout} 秒）") from error
         except httpx.PoolTimeout as error:
-            raise RuntimeError(f"等待模型连接池超时（{timeout} 秒）") from error
+            raise ModelFallbackError("temporarily_unavailable", f"等待模型连接池超时（{timeout} 秒）") from error
         except httpx.ConnectError as error:
-            raise RuntimeError(
+            raise ModelFallbackError("temporarily_unavailable",
                 f"无法建立模型连接：{self._safe_error(str(error)) or type(error).__name__}"
             ) from error
         except httpx.HTTPError as error:

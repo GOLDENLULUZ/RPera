@@ -21,7 +21,7 @@ from .config import CapabilitySettingsStore, DrawingPresetStore, NetworkSettings
 from .content_api import content_router
 from .content_store import ContentStore
 from .drawing_providers import NovelAIClient, StableDiffusionWebUIClient
-from .models import AgentPresetSettingsWrite, CapabilitySettings, ConnectionTestResult, ContentEntityCreate, DrawingConnectionTestResult, DrawingDefaultWrite, DrawingPresetWrite, DrawingTestRequest, EventPage, NetworkSettingsWrite, PresetDuplicate, PresetWrite, RuntimeEvent, RuntimeSettings, SaveBranch, SaveCreate, SaveEntityDelete, SaveEntityMove, SaveEntityUpdate, SaveRename, TracePage, TurnCreate
+from .models import AgentPresetSettingsWrite, AiFallbackSettingsWrite, CapabilitySettings, ConnectionTestResult, ContentEntityCreate, DrawingConnectionTestResult, DrawingDefaultWrite, DrawingPresetWrite, DrawingTestRequest, EventPage, ModelListRequest, NetworkSettingsWrite, PresetDuplicate, PresetWrite, RuntimeEvent, RuntimeSettings, SaveBranch, SaveCreate, SaveEntityDelete, SaveEntityMove, SaveEntityUpdate, SaveRename, TracePage, TurnCreate
 from .prompt_store import PromptConfigurationError, PromptStore
 from .providers import BoundModelClient, ConfiguredModelClient, ModelClient
 from .runtime import AgentRuntime, EventHub, TurnAbortError
@@ -108,6 +108,7 @@ def create_app(
         static_version = max(
             (PROJECT_ROOT / "web" / "static" / "app.css").stat().st_mtime_ns,
             (PROJECT_ROOT / "web" / "static" / "app.js").stat().st_mtime_ns,
+            (PROJECT_ROOT / "web" / "static" / "trace-markdown.js").stat().st_mtime_ns,
         )
         response = templates.TemplateResponse(
             request=request,
@@ -424,10 +425,12 @@ def create_app(
                         break
                 while True:
                     try:
-                        await asyncio.wait_for(queue.get(), timeout=15)
+                        close_stream = await asyncio.wait_for(queue.get(), timeout=15)
                     except TimeoutError:
                         yield ": heartbeat\n\n"
                         continue
+                    if close_stream:
+                        return
                     while True:
                         pending = await asyncio.to_thread(saves.list_events, save_id, last_id, 500)
                         for event in pending:
@@ -553,6 +556,21 @@ def create_app(
             "agents": [agent.__dict__ for agent in AGENT_CATALOG],
         }
 
+    @application.get("/api/ai-fallback-settings")
+    def get_ai_fallback_settings():
+        collection = presets.public()
+        return {"enabled": collection.fallback_enabled, "preset_id": collection.fallback_preset_id}
+
+    @application.put("/api/ai-fallback-settings")
+    def update_ai_fallback_settings(payload: AiFallbackSettingsWrite):
+        try:
+            collection = presets.update_fallback_settings(payload)
+            return {"enabled": collection.fallback_enabled, "preset_id": collection.fallback_preset_id}
+        except KeyError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
     @application.put("/api/agent-preset-settings")
     def update_agent_preset_settings(payload: AgentPresetSettingsWrite):
         try:
@@ -616,11 +634,11 @@ def create_app(
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
 
-    @application.get("/api/ai-presets/{preset_id}/models")
-    async def list_preset_models(preset_id: str):
+    @application.post("/api/ai-presets/models")
+    async def list_preset_models(payload: ModelListRequest):
         try:
             client = BoundModelClient(
-                await asyncio.to_thread(presets.get, preset_id),
+                await asyncio.to_thread(presets.model_list_preset, payload),
                 network_settings=await asyncio.to_thread(network_settings.get),
             )
             return await client.list_models()

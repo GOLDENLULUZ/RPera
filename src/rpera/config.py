@@ -8,8 +8,10 @@ from threading import Lock
 from urllib.parse import urlparse
 
 from .agents import AGENTS, agent_names
+from .gemini_thinking import supported_gemini_thinking_levels
 from .models import (
     AgentPresetSettingsWrite,
+    AiFallbackSettingsWrite,
     AiPreset,
     CapabilitySettings,
     PresetCollection,
@@ -23,6 +25,7 @@ from .models import (
     DrawingPreset,
     DrawingPresetCollection,
     DrawingPresetWrite,
+    ModelListRequest,
     PublicDrawingPreset,
     PublicDrawingPresetCollection,
 )
@@ -40,7 +43,10 @@ class PresetStore:
                 main_preset_id=collection.main_preset_id,
                 agent_preset_overrides=collection.agent_preset_overrides,
                 agent_streaming=collection.agent_streaming,
+                fallback_enabled=collection.fallback_enabled,
+                fallback_preset_id=collection.fallback_preset_id,
                 presets=[self._public_preset(preset) for preset in collection.presets],
+                gemini_thinking_levels=supported_gemini_thinking_levels(),
             )
 
     def resolve(self, agent_names: tuple[str, ...]) -> dict[str, AiPreset]:
@@ -64,10 +70,56 @@ class PresetStore:
                 for name in agent_names
             }
 
+    def resolve_with_fallback(self, names: tuple[str, ...]) -> dict[str, tuple[AiPreset, AiPreset | None, bool]]:
+        with self._write_lock:
+            collection = self._load_unlocked()
+            fallback = self._find(collection, collection.fallback_preset_id) if collection.fallback_enabled and collection.fallback_preset_id else None
+            return {
+                name: (
+                    self._find(collection, collection.agent_preset_overrides.get(name, collection.main_preset_id)).model_copy(deep=True),
+                    fallback.model_copy(deep=True) if fallback else None,
+                    collection.agent_streaming.get(name, False),
+                )
+                for name in names
+            }
+
+    def update_fallback_settings(self, request: AiFallbackSettingsWrite) -> PublicPresetCollection:
+        with self._write_lock:
+            collection = self._load_unlocked()
+            if request.enabled and request.preset_id is None:
+                raise ValueError("启用备用 AI 时必须选择 AI Preset")
+            if request.preset_id is not None:
+                self._find(collection, request.preset_id)
+            collection.fallback_enabled = request.enabled
+            collection.fallback_preset_id = request.preset_id
+            self._write_unlocked(collection)
+            return self._public_collection(collection)
+
     def get(self, preset_id: str) -> AiPreset:
         with self._write_lock:
             collection = self._load_unlocked()
             return self._find(collection, preset_id).model_copy(deep=True)
+
+    def model_list_preset(self, request: ModelListRequest) -> AiPreset:
+        with self._write_lock:
+            api_key = request.api_key
+            name = "未保存的 AI Preset"
+            if request.preset_id is not None:
+                current = self._find(self._load_unlocked(), request.preset_id)
+                name = current.name
+                if not api_key and request.provider == current.provider:
+                    api_key = current.api_key
+            return AiPreset(
+                id=request.preset_id or "unsaved",
+                name=name,
+                provider=request.provider,
+                base_url=request.base_url.rstrip("/"),
+                api_key=api_key,
+                model="",
+                xai_protocol=request.xai_protocol,
+                openai_protocol=request.openai_protocol,
+                timeout_seconds=request.timeout_seconds,
+            )
 
     def create(self, request: PresetWrite) -> PublicPresetCollection:
         with self._write_lock:
@@ -113,6 +165,9 @@ class PresetStore:
                 name: replacement_id if assigned_id == preset_id else assigned_id
                 for name, assigned_id in collection.agent_preset_overrides.items()
             }
+            if collection.fallback_preset_id == preset_id:
+                collection.fallback_preset_id = None
+                collection.fallback_enabled = False
             self._write_unlocked(collection)
             return self._public_collection(collection)
 
@@ -174,6 +229,10 @@ class PresetStore:
             raise ValueError("主代理的 AI Preset 不存在")
         if any(preset_id not in ids for preset_id in collection.agent_preset_overrides.values()):
             raise ValueError("子代理的 AI Preset 不存在")
+        if collection.fallback_preset_id is not None and collection.fallback_preset_id not in ids:
+            raise ValueError("备用 AI Preset 不存在")
+        if collection.fallback_enabled and collection.fallback_preset_id is None:
+            raise ValueError("启用备用 AI 时必须选择 AI Preset")
 
     @staticmethod
     def _base_url(request: PresetWrite) -> str:
@@ -191,10 +250,12 @@ class PresetStore:
             api_key=request.api_key if api_key is None else api_key,
             model=request.model,
             xai_protocol=request.xai_protocol,
+            openai_protocol=request.openai_protocol,
             timeout_seconds=request.timeout_seconds,
             temperature=request.temperature,
             top_p=request.top_p,
             max_tokens=request.max_tokens,
+            thinking_level=request.thinking_level,
         )
 
     @classmethod
@@ -203,7 +264,10 @@ class PresetStore:
             main_preset_id=collection.main_preset_id,
             agent_preset_overrides=collection.agent_preset_overrides,
             agent_streaming=collection.agent_streaming,
+            fallback_enabled=collection.fallback_enabled,
+            fallback_preset_id=collection.fallback_preset_id,
             presets=[cls._public_preset(preset) for preset in collection.presets],
+            gemini_thinking_levels=supported_gemini_thinking_levels(),
         )
 
     @staticmethod
@@ -217,10 +281,12 @@ class PresetStore:
             base_url=preset.base_url,
             model=preset.model,
             xai_protocol=preset.xai_protocol,
+            openai_protocol=preset.openai_protocol,
             timeout_seconds=preset.timeout_seconds,
             temperature=preset.temperature,
             top_p=preset.top_p,
             max_tokens=preset.max_tokens,
+            thinking_level=preset.thinking_level,
             has_api_key=bool(key),
             masked_api_key=masked,
         )

@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StrictBool, model_validator
 
 from .content import character_snapshot_path, content_name, entity_aliases, entity_snapshot_path, entity_type, location_snapshot_path, style_path
+from .gemini_thinking import GeminiThinkingLevel, validate_gemini_thinking_level
 
 
 ProviderName = Literal["openai_compatible", "deepseek", "google_gemini", "anthropic", "xai"]
 XaiProtocol = Literal["responses", "chat_completions"]
+OpenAiProtocol = Literal["chat_completions", "responses"]
 DrawingProviderName = Literal["stable_diffusion_webui", "novelai"]
 NovelAIImageModel = Literal["nai-diffusion-5-full", "nai-diffusion-5-curated", "nai-diffusion-4-5-full", "nai-diffusion-4-5-curated"]
 NetworkMode = Literal["direct", "custom"]
@@ -31,10 +33,17 @@ class AiPreset(BaseModel):
     api_key: str = ""
     model: str = "deepseek-chat"
     xai_protocol: XaiProtocol = "responses"
+    openai_protocol: OpenAiProtocol = "chat_completions"
     timeout_seconds: int = Field(default=120, ge=5, le=600)
     temperature: float = Field(default=1.0, ge=0, le=2)
     top_p: float = Field(default=1.0, gt=0, le=1)
     max_tokens: int = Field(default=65_536, ge=1, le=1_048_576)
+    thinking_level: GeminiThinkingLevel | None = None
+
+    @model_validator(mode="after")
+    def validate_thinking_level(self) -> AiPreset:
+        validate_gemini_thinking_level(self.provider, self.model, self.thinking_level)
+        return self
 
 
 class PublicAiPreset(BaseModel):
@@ -44,10 +53,12 @@ class PublicAiPreset(BaseModel):
     base_url: str
     model: str
     xai_protocol: XaiProtocol
+    openai_protocol: OpenAiProtocol
     timeout_seconds: int
     temperature: float
     top_p: float
     max_tokens: int
+    thinking_level: GeminiThinkingLevel | None
     has_api_key: bool
     masked_api_key: str
 
@@ -61,10 +72,29 @@ class PresetWrite(BaseModel):
     api_key: str = ""
     model: str = Field(min_length=1, max_length=200)
     xai_protocol: XaiProtocol = "responses"
+    openai_protocol: OpenAiProtocol = "chat_completions"
     timeout_seconds: int = Field(default=120, ge=5, le=600)
     temperature: float = Field(default=1.0, ge=0, le=2)
     top_p: float = Field(default=1.0, gt=0, le=1)
     max_tokens: int = Field(default=65_536, ge=1, le=1_048_576)
+    thinking_level: GeminiThinkingLevel | None = None
+
+    @model_validator(mode="after")
+    def validate_thinking_level(self) -> PresetWrite:
+        validate_gemini_thinking_level(self.provider, self.model, self.thinking_level)
+        return self
+
+
+class ModelListRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    preset_id: str | None = None
+    provider: ProviderName
+    base_url: str = Field(min_length=1)
+    api_key: str = ""
+    xai_protocol: XaiProtocol = "responses"
+    openai_protocol: OpenAiProtocol = "chat_completions"
+    timeout_seconds: int = Field(default=120, ge=5, le=600)
 
 
 class PresetCollection(BaseModel):
@@ -73,6 +103,8 @@ class PresetCollection(BaseModel):
     main_preset_id: str
     agent_preset_overrides: dict[str, str] = Field(default_factory=dict)
     agent_streaming: dict[str, bool] = Field(default_factory=dict)
+    fallback_enabled: bool = False
+    fallback_preset_id: str | None = None
     presets: list[AiPreset]
 
 
@@ -80,7 +112,10 @@ class PublicPresetCollection(BaseModel):
     main_preset_id: str
     agent_preset_overrides: dict[str, str]
     agent_streaming: dict[str, bool]
+    fallback_enabled: bool
+    fallback_preset_id: str | None
     presets: list[PublicAiPreset]
+    gemini_thinking_levels: dict[str, list[GeminiThinkingLevel]]
 
 
 class PresetDuplicate(BaseModel):
@@ -95,6 +130,13 @@ class AgentPresetSettingsWrite(BaseModel):
     agent_streaming: dict[str, bool] = Field(default_factory=dict)
 
 
+class AiFallbackSettingsWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    preset_id: str | None = None
+
+
 class RuntimeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -107,6 +149,7 @@ class RuntimeSettings(BaseModel):
     force_publish_narrative: bool = False
     force_start_delegation: bool = False
     block_coordinator_narrative_read: bool = False
+    use_compliance_fixed_response: bool = False
 
 
 class NetworkSettings(BaseModel):
@@ -216,11 +259,21 @@ class CharacterPortraitGenerationSettings(BaseModel):
     negative_prompt: str = Field(default="", max_length=8_000)
 
 
+class NarrativeTokenCountingSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    max_tokens: int = Field(default=4_000, ge=1, le=1_048_576, strict=True)
+
+
 class CapabilitySettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     character_portrait_generation: CharacterPortraitGenerationSettings = Field(
         default_factory=CharacterPortraitGenerationSettings
+    )
+    narrative_token_counting: NarrativeTokenCountingSettings = Field(
+        default_factory=NarrativeTokenCountingSettings
     )
 
 

@@ -61,16 +61,37 @@ const TOOL_LABELS = {
     character_rename: "角色更名",
     character_portrait_generate: "生成角色立绘",
     character_report: "提交角色报告",
+    role_report: "提交角色报告",
+    erotic_report: "提交意见报告",
     location_create: "创建地点",
     location_edit: "编辑地点",
     location_rename: "地点更名",
     location_report: "提交地点报告",
     style_read: "读取文风",
     style_report: "提交文风报告",
+    report_read: "读取报告",
+    compliance_report: "提交审核报告",
+    story_summary_read: "读取故事摘要",
+    story_summary_edit: "编辑故事摘要",
+    story_history_read: "读取故事历史",
+    goal_read: "读取目标",
+    goal_create: "创建目标",
+    goal_edit: "编辑目标",
     file_read: "读取草稿",
     file_write: "写入草稿",
     file_edit: "编辑草稿",
     narrative_publish: "发布故事",
+};
+const TRACE_MARKDOWN_FIELDS = new Set([
+    "content", "report", "document", "narrative", "task", "reason", "message", "summary",
+    "old_text", "new_text", "opening", "player_input", "text",
+]);
+const TRACE_STRUCTURED_FIELDS = new Set(["documents", "report_documents", "results", "goal", "error", "summary", "turns", "character", "location"]);
+const TRACE_FIELD_LABELS = {
+    content: "内容", report: "报告", document: "文档", narrative: "故事", task: "任务",
+    reason: "原因", message: "消息", summary: "摘要", old_text: "原文", new_text: "新文本",
+    opening: "开局", player_input: "玩家输入", report_documents: "报告列表", documents: "实体列表",
+    results: "结果列表", goal: "目标", error: "错误", turns: "回合", character: "角色", location: "地点",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -1081,6 +1102,8 @@ function projectLiveTraceEvent(event) {
     } else if (event.type === "model.response") {
         if (payload.tool_calls?.length || typeof payload.content !== "string" || !payload.content.trim()) return null;
         projected = tracePayload(payload, ["agent", "content", "duration_ms"]);
+    } else if (event.type === "model.fallback") {
+        projected = tracePayload(payload, ["agent", "reason", "error", "primary_model", "fallback_model"]);
     } else if (event.type === "agent.fixed_response") {
         projected = tracePayload(payload, ["agent", "result"]);
     } else if (event.type === "task.created") {
@@ -1135,6 +1158,13 @@ function renderEvent(event) {
         appendReferenceList(payload, "传递实体", event.payload.related_entities, (item) => item.name ? `${item.name} · ${item.path}` : item.path);
         appendReferenceList(payload, "传递报告", event.payload.reports, (item) => item.source_agent ? `${item.name} · 来自 ${agentLabel(item.source_agent)}` : item.name);
         appendReferenceList(payload, "传递文风", event.payload.styles, (item) => item.name ? `${item.name} · ${item.path}` : item.path);
+    } else if (event.type === "model.fallback") {
+        actor.textContent = agentLabel(event.payload.agent);
+        action.textContent = "启用备用 AI";
+        payload.append(traceSection("触发原因", event.payload.reason === "content_blocked" ? "内容拦截" : "接口暂时不可用"));
+        payload.append(traceSection("首选 AI", event.payload.primary_model?.preset_name || ""));
+        payload.append(traceSection("备用 AI", event.payload.fallback_model?.preset_name || ""));
+        payload.append(traceSection("原始错误", event.payload.error || ""));
     } else if (event.type.startsWith("tool.")) {
         const tool = event.payload.tool || "tool";
         actor.textContent = agentLabel(event.payload.agent);
@@ -1191,27 +1221,66 @@ function parseTraceInput(input) {
     try { return JSON.parse(input); } catch { return input; }
 }
 
-function traceSection(label, text) {
+function traceSection(label, text, markdown = true) {
     const section = document.createElement("section");
     section.className = "trace-section";
     const title = document.createElement("div");
     title.className = "trace-section-title";
     title.textContent = label;
     const content = document.createElement("div");
-    content.className = "trace-text";
-    content.textContent = text;
+    content.className = markdown ? "trace-text trace-markdown" : "trace-text";
+    if (markdown) content.innerHTML = RPeraTraceMarkdown.render(String(text ?? ""));
+    else content.textContent = text;
     section.append(title, content);
     return section;
 }
 
 function traceDataSection(label, value) {
     if (typeof value === "string") return traceSection(label, value);
-    const section = traceSection(label, "");
+    const section = traceSection(label, "", false);
+    const fields = document.createElement("div");
+    fields.className = "trace-fields";
+    if (Array.isArray(value) && value.length && value.every((item) => item && typeof item === "object" && !Array.isArray(item))) {
+        value.forEach((item, index) => {
+            const name = item.name || item.path || item.turn_number || `第 ${index + 1} 项`;
+            fields.append(traceDataSection(String(name), item));
+        });
+    } else if (value && typeof value === "object" && !Array.isArray(value)) {
+        const metadata = {};
+        for (const [key, item] of Object.entries(value)) {
+            if (typeof item === "string" && (TRACE_MARKDOWN_FIELDS.has(key) || item.includes("\n"))) {
+                if (key === "document" && typeof value.content === "string") {
+                    const details = document.createElement("details");
+                    details.className = "trace-detail";
+                    const summary = document.createElement("summary");
+                    summary.textContent = "完整文件原文";
+                    const original = document.createElement("pre");
+                    original.className = "trace-data";
+                    original.textContent = item;
+                    details.append(summary, original);
+                    fields.append(details);
+                } else {
+                    fields.append(traceSection(TRACE_FIELD_LABELS[key] || key, item));
+                }
+            } else if (item && typeof item === "object" && TRACE_STRUCTURED_FIELDS.has(key)) {
+                fields.append(traceDataSection(TRACE_FIELD_LABELS[key] || key, item));
+            } else {
+                metadata[key] = item;
+            }
+        }
+        if (Object.keys(metadata).length) fields.append(traceJson(metadata));
+    } else {
+        fields.append(traceJson(value));
+    }
+    section.lastElementChild.replaceWith(fields);
+    return section;
+}
+
+function traceJson(value) {
     const content = document.createElement("pre");
     content.className = "trace-data";
     content.textContent = JSON.stringify(value ?? null, null, 2);
-    section.lastElementChild.replaceWith(content);
-    return section;
+    return content;
 }
 
 function appendReferenceList(container, label, items, describe) {
@@ -1235,30 +1304,6 @@ function appendReferenceList(container, label, items, describe) {
 function renderToolResult(tool, result) {
     const container = document.createElement("div");
     container.className = "trace-result";
-    if (tool === "entity_read" && Array.isArray(result?.documents)) {
-        for (const document of result.documents) {
-            const label = document.name ? `${document.name} · ${document.path}` : document.path;
-            container.append(traceSection(label, document.content || ""));
-        }
-        const metadata = { ...result };
-        delete metadata.documents;
-        if (Object.keys(metadata).length) container.append(traceDataSection("读取信息", metadata));
-        return container;
-    }
-    if (["research_report", "style_report"].includes(tool) && result?.report) {
-        container.append(traceSection("报告", result.report));
-        const references = { ...result };
-        delete references.report;
-        if (Object.keys(references).length) container.append(traceDataSection("引用", references));
-        return container;
-    }
-    if (result && typeof result === "object" && typeof result.content === "string") {
-        const metadata = { ...result };
-        delete metadata.content;
-        container.append(traceSection("内容", result.content));
-        if (Object.keys(metadata).length) container.append(traceDataSection("结果", metadata));
-        return container;
-    }
     container.append(traceDataSection("结果", result));
     return container;
 }
@@ -1304,11 +1349,16 @@ function handleEvent(event) {
             elements.turnStatus.textContent = "回合已中止，可以从断点继续";
             elements.turnStatus.classList.remove("error-text");
         } else {
-            elements.turnStatus.textContent = `失败：${event.payload.message}`;
+            elements.turnStatus.textContent = `失败：${shortErrorMessage(event.payload.message)}`;
             elements.turnStatus.classList.add("error-text");
         }
     }
     updateTurnControls();
+}
+
+function shortErrorMessage(message) {
+    const text = String(message || "未知错误").replace(/\s+/g, " ").trim();
+    return text.length > 240 ? `${text.slice(0, 240)}…（详情见后台运行记录）` : text;
 }
 
 function updateTurnControls() {
@@ -1341,7 +1391,7 @@ async function retryResumableTurn() {
     } catch (error) {
         state.running = false;
         state.activeTurnId = null;
-        elements.turnStatus.textContent = error.message;
+        elements.turnStatus.textContent = shortErrorMessage(error.message);
         elements.turnStatus.classList.add("error-text");
         updateTurnControls();
     }
@@ -1372,7 +1422,7 @@ async function submitTurn(event) {
     } catch (error) {
         state.running = false;
         updateTurnControls();
-        elements.turnStatus.textContent = error.message;
+        elements.turnStatus.textContent = shortErrorMessage(error.message);
         elements.turnStatus.classList.add("error-text");
     }
 }
@@ -1395,7 +1445,7 @@ async function abortRunningTurn() {
     } catch (error) {
         if (!state.running || state.activeTurnId !== turnId) return;
         state.aborting = false;
-        elements.turnStatus.textContent = error.message;
+        elements.turnStatus.textContent = shortErrorMessage(error.message);
         updateTurnControls();
         elements.turnStatus.classList.add("error-text");
     }
@@ -1403,12 +1453,45 @@ async function abortRunningTurn() {
 
 async function loadPresets(preferredId = state.selectedPresetId) {
     state.presets = await api("/api/ai-presets");
+    renderAiFallbackSettings();
     const available = state.presets.presets.some((preset) => preset.id === preferredId);
     state.selectedPresetId = available ? preferredId : state.presets.main_preset_id;
     state.creatingPreset = false;
     renderPresetList();
     selectPreset(state.selectedPresetId);
     if (state.agentPresetSettings) renderAgentPresetFields();
+}
+
+function renderAiFallbackSettings() {
+    const select = $("#ai-fallback-preset");
+    select.replaceChildren(new Option("请选择 Preset", ""));
+    for (const preset of state.presets.presets) {
+        select.append(new Option(`${preset.name} / ${preset.model}`, preset.id));
+    }
+    select.value = state.presets.fallback_preset_id || "";
+    $("#ai-fallback-enabled").checked = state.presets.fallback_enabled;
+}
+
+async function saveAiFallbackSettings(event) {
+    event.preventDefault();
+    const status = $("#ai-fallback-status");
+    status.textContent = "保存中……";
+    status.classList.remove("error-text");
+    try {
+        const enabled = $("#ai-fallback-enabled").checked;
+        const presetId = $("#ai-fallback-preset").value || null;
+        if (enabled && !presetId) throw new Error("启用备用 AI 时请选择 Preset");
+        const updated = await api("/api/ai-fallback-settings", {
+            method: "PUT",
+            body: JSON.stringify({ enabled, preset_id: presetId }),
+        });
+        state.presets.fallback_enabled = updated.enabled;
+        state.presets.fallback_preset_id = updated.preset_id;
+        status.textContent = "备用 AI 已保存";
+    } catch (error) {
+        status.textContent = error.message;
+        status.classList.add("error-text");
+    }
 }
 
 async function loadRuntimeSettings() {
@@ -1505,10 +1588,21 @@ function renderAgentPresetFields() {
         prefillCheckbox.dataset.agentPrefill = agent.name;
         prefillCheckbox.checked = state.runtimeSettings.prefill_agents.includes(agent.name);
         const prefillText = document.createElement("span");
-        prefillText.textContent = agent.uses_fixed_response
+        prefillText.textContent = agent.supports_fixed_response
             ? "尾部续写（固定响应模式下不生效）"
             : "尾部续写";
         prefill.append(prefillCheckbox, prefillText);
+        const fixedResponse = document.createElement("label");
+        fixedResponse.className = "checkbox-line";
+        if (agent.supports_fixed_response) {
+            const fixedResponseCheckbox = document.createElement("input");
+            fixedResponseCheckbox.type = "checkbox";
+            fixedResponseCheckbox.dataset.complianceFixedResponse = "true";
+            fixedResponseCheckbox.checked = state.runtimeSettings.use_compliance_fixed_response;
+            const fixedResponseText = document.createElement("span");
+            fixedResponseText.textContent = "使用固定响应";
+            fixedResponse.append(fixedResponseCheckbox, fixedResponseText);
+        }
         const instructionBlocking = document.createElement("label");
         instructionBlocking.className = "checkbox-line";
         if (!agent.is_main) {
@@ -1577,6 +1671,7 @@ function renderAgentPresetFields() {
             availability.append(availabilityText);
         }
         label.append(select, streaming, prefill);
+        if (agent.supports_fixed_response) label.append(fixedResponse);
         if (agent.is_main) label.append(forceStartDelegation);
         if (agent.is_main) label.append(blockNarrativeRead);
         if (!agent.is_main) label.append(instructionBlocking);
@@ -1604,6 +1699,7 @@ async function saveRuntimeSettings(event) {
             force_publish_narrative: Boolean($("#agent-preset-fields").querySelector("input[data-force-publish-narrative]:checked")),
             force_start_delegation: Boolean($("#agent-preset-fields").querySelector("input[data-force-start-delegation]:checked")),
             block_coordinator_narrative_read: Boolean($("#agent-preset-fields").querySelector("input[data-block-coordinator-narrative-read]:checked")),
+            use_compliance_fixed_response: Boolean($("#agent-preset-fields").querySelector("input[data-compliance-fixed-response]:checked")),
         };
         state.runtimeSettings = await api("/api/runtime-settings", {
             method: "PUT",
@@ -1677,6 +1773,7 @@ function fillPresetForm(preset) {
     $("#preset-name").value = preset.name;
     $("#provider").value = preset.provider;
     $("#xai-protocol").value = preset.xai_protocol || "responses";
+    $("#openai-protocol").value = preset.openai_protocol || "chat_completions";
     $("#base-url").value = preset.base_url;
     $("#api-key").value = "";
     $("#model").value = preset.model;
@@ -1685,11 +1782,10 @@ function fillPresetForm(preset) {
     $("#top-p").value = preset.top_p;
     $("#max-tokens").value = preset.max_tokens;
     $("#key-status").textContent = preset.has_api_key ? `已保存 ${preset.masked_api_key}` : "尚未设置";
-    const modelSelect = $("#model-select");
-    modelSelect.replaceChildren(new Option("尚未拉取模型", ""));
-    modelSelect.disabled = true;
+    resetModelOptions();
     setPresetStatus("");
     updateProviderFields();
+    updateGeminiThinkingFields(preset.thinking_level);
 }
 
 function startNewPreset() {
@@ -1702,10 +1798,12 @@ function startNewPreset() {
         base_url: "https://api.deepseek.com",
         model: "deepseek-chat",
         xai_protocol: "responses",
+        openai_protocol: "chat_completions",
         timeout_seconds: 120,
         temperature: 1,
         top_p: 1,
         max_tokens: 65536,
+        thinking_level: null,
         has_api_key: false,
         masked_api_key: "",
     });
@@ -1724,11 +1822,31 @@ function presetPayload() {
         api_key: $("#api-key").value,
         model: $("#model").value,
         xai_protocol: $("#xai-protocol").value,
+        openai_protocol: $("#openai-protocol").value,
         timeout_seconds: Number($("#timeout").value),
         temperature: Number($("#temperature").value),
         top_p: Number($("#top-p").value),
         max_tokens: Number($("#max-tokens").value),
+        thinking_level: $("#gemini-thinking-level").value || null,
     };
+}
+
+function modelListPayload() {
+    return {
+        preset_id: state.creatingPreset ? null : state.selectedPresetId,
+        provider: $("#provider").value,
+        base_url: $("#base-url").value,
+        api_key: $("#api-key").value,
+        xai_protocol: $("#xai-protocol").value,
+        openai_protocol: $("#openai-protocol").value,
+        timeout_seconds: Number($("#timeout").value),
+    };
+}
+
+function resetModelOptions() {
+    const modelSelect = $("#model-select");
+    modelSelect.replaceChildren(new Option("尚未拉取模型", ""));
+    modelSelect.disabled = true;
 }
 
 async function savePreset(event) {
@@ -1794,19 +1912,16 @@ async function deletePreset() {
 }
 
 async function loadModels() {
-    if (!state.selectedPresetId || state.creatingPreset) {
-        setPresetStatus("请先保存 Preset，再拉取模型列表", true);
-        return;
-    }
-    if (state.presetDirty) {
-        setPresetStatus("请先保存当前修改，再拉取模型列表", true);
-        return;
-    }
-    const requestedPresetId = state.selectedPresetId;
+    if (!$("#base-url").reportValidity() || !$("#timeout").reportValidity()) return;
+    const payload = modelListPayload();
+    const requestKey = JSON.stringify(payload);
     setPresetStatus("正在拉取模型列表……");
     try {
-        const models = await api(`/api/ai-presets/${requestedPresetId}/models`);
-        if (state.selectedPresetId !== requestedPresetId) return;
+        const models = await api("/api/ai-presets/models", {
+            method: "POST",
+            body: JSON.stringify(payload),
+        });
+        if (JSON.stringify(modelListPayload()) !== requestKey) return;
         const options = [new Option("选择已拉取的模型", "")];
         for (const model of models) {
             const label = model.owned_by ? `${model.id} / ${model.owned_by}` : model.id;
@@ -1817,7 +1932,7 @@ async function loadModels() {
         modelSelect.disabled = models.length === 0;
         setPresetStatus(`已拉取 ${models.length} 个模型，可直接输入或选择`);
     } catch (error) {
-        if (state.selectedPresetId !== requestedPresetId) return;
+        if (JSON.stringify(modelListPayload()) !== requestKey) return;
         setPresetStatus(error.message, true);
     }
 }
@@ -1857,22 +1972,44 @@ async function runPresetAction(action, message) {
 function updateProviderFields(applyDefaults = false) {
     $("#base-url").disabled = false;
     $("#xai-protocol-field").classList.toggle("hidden", $("#provider").value !== "xai");
-    if (!applyDefaults) return;
-    const defaults = {
-        deepseek: ["https://api.deepseek.com", "deepseek-chat"],
-        openai_compatible: ["", ""],
-        google_gemini: ["https://generativelanguage.googleapis.com/v1beta", "gemini-flash-latest"],
-        anthropic: ["https://api.anthropic.com/v1", "claude-sonnet-4-6"],
-        xai: ["https://api.x.ai/v1", "grok-4.6"],
-    }[$("#provider").value];
-    if (!defaults) return;
-    $("#base-url").value = defaults[0];
-    $("#model").value = defaults[1];
+    $("#openai-protocol-field").classList.toggle("hidden", $("#provider").value !== "openai_compatible");
+    if (applyDefaults) {
+        const defaults = {
+            deepseek: ["https://api.deepseek.com", "deepseek-chat"],
+            openai_compatible: ["", ""],
+            google_gemini: ["https://generativelanguage.googleapis.com/v1beta", "gemini-flash-latest"],
+            anthropic: ["https://api.anthropic.com/v1", "claude-sonnet-4-6"],
+            xai: ["https://api.x.ai/v1", "grok-4.6"],
+        }[$("#provider").value];
+        if (defaults) {
+            $("#base-url").value = defaults[0];
+            $("#model").value = defaults[1];
+        }
+    }
+    updateGeminiThinkingFields(undefined, applyDefaults);
+}
+
+function updateGeminiThinkingFields(preferred = $("#gemini-thinking-level").value, notify = false) {
+    const model = $("#model").value.trim().replace(/^models\//, "");
+    const levels = $("#provider").value === "google_gemini" ? state.presets?.gemini_thinking_levels?.[model] : null;
+    const select = $("#gemini-thinking-level");
+    select.replaceChildren(new Option("自动（模型默认）", ""));
+    for (const level of levels || []) {
+        const labels = {minimal: "最低", low: "低", medium: "中", high: "高"};
+        select.add(new Option(labels[level], level));
+    }
+    select.value = levels?.includes(preferred) ? preferred : "";
+    $("#gemini-thinking-field").classList.toggle("hidden", !levels);
+    if (notify && preferred && !select.value) {
+        setPresetStatus("当前模型不支持原思考强度，已改为自动；请保存 Preset");
+        return true;
+    }
+    return false;
 }
 
 function setPresetStatus(message, error = false) {
     const status = $("#settings-status");
-    status.textContent = message;
+    status.textContent = error ? shortErrorMessage(message) : message;
     status.classList.toggle("error-text", error);
 }
 
@@ -2022,6 +2159,7 @@ function setCapabilityOptions(id, resources, selected) {
 async function loadCapabilitySettings() {
     state.capabilitySettings = await api("/api/capability-settings");
     const settings = state.capabilitySettings.character_portrait_generation;
+    const tokenCounting = state.capabilitySettings.narrative_token_counting;
     $("#capability-enabled").checked = settings.enabled;
     setCapabilityOptions("capability-checkpoint", [], settings.checkpoint);
     setCapabilityOptions("capability-sampler", [], settings.sampler_name);
@@ -2036,6 +2174,8 @@ async function loadCapabilitySettings() {
         "capability-positive-prompt": settings.positive_prompt,
         "capability-negative-prompt": settings.negative_prompt,
     })) $("#" + id).value = value;
+    $("#token-counting-enabled").checked = tokenCounting.enabled;
+    $("#token-counting-max-tokens").value = tokenCounting.max_tokens;
     state.capabilitySettingsDirty = false;
     setCapabilityStatus("");
 }
@@ -2055,7 +2195,20 @@ function capabilitySettingsPayload() {
             positive_prompt: $("#capability-positive-prompt").value,
             negative_prompt: $("#capability-negative-prompt").value,
         },
+        narrative_token_counting: {
+            enabled: $("#token-counting-enabled").checked,
+            max_tokens: Number($("#token-counting-max-tokens").value),
+        },
     };
+}
+
+function selectCapabilityPanel(button) {
+    document.querySelectorAll("[data-capability-panel]").forEach((item) => {
+        const selected = item === button;
+        item.classList.toggle("selected", selected);
+        item.setAttribute("aria-pressed", String(selected));
+        $("#" + item.dataset.capabilityPanel).classList.toggle("hidden", !selected);
+    });
 }
 
 async function saveCapabilitySettings(event) {
@@ -2105,14 +2258,14 @@ async function testDrawingPreset() {
 async function generateDrawingTest() {
     const contentPrompt = $("#drawing-test-content").value.trim();
     if (!state.selectedDrawingPresetId || state.creatingDrawingPreset || state.drawingPresetDirty) return setDrawingTestStatus("请先保存当前 Preset，再生成测试图", true);
-    if (state.capabilitySettingsDirty) return setDrawingTestStatus("请先保存角色立绘能力设置，再生成测试图", true);
+    if (state.capabilitySettingsDirty) return setDrawingTestStatus("请先保存能力设置，再生成测试图", true);
     if (!contentPrompt) return setDrawingTestStatus("请输入正面内容词", true);
     setDrawingTestStatus("正在生成……");
     try { const result = await api(`/api/drawing-presets/${state.selectedDrawingPresetId}/test-generation`, { method: "POST", body: JSON.stringify({ content_prompt: contentPrompt }) }); const image = $("#drawing-test-image"); image.src = result.image_data_url; image.classList.remove("hidden"); setDrawingTestStatus(`生成完成 / ${result.width} x ${result.height}${result.seed === null ? "" : ` / seed ${result.seed}`}`); } catch (error) { setDrawingTestStatus(error.message, true); }
 }
 
-function setDrawingStatus(message, error = false) { const status = $("#drawing-settings-status"); status.textContent = message; status.classList.toggle("error-text", error); }
-function setDrawingTestStatus(message, error = false) { const status = $("#drawing-test-status"); status.textContent = message; status.classList.toggle("error-text", error); }
+function setDrawingStatus(message, error = false) { const status = $("#drawing-settings-status"); status.textContent = error ? shortErrorMessage(message) : message; status.classList.toggle("error-text", error); }
+function setDrawingTestStatus(message, error = false) { const status = $("#drawing-test-status"); status.textContent = error ? shortErrorMessage(message) : message; status.classList.toggle("error-text", error); }
 function setCapabilityStatus(message, error = false) { const status = $("#capability-settings-status"); status.textContent = message; status.classList.toggle("error-text", error); }
 
 function fixedCreationBase(kind, sourceName = null) {
@@ -2637,7 +2790,7 @@ function createEntityListButton(entity, selected = false, onSelect = () => selec
 }
 
 function entityTypeLabel(type) {
-    return { character: "角色", location: "地点", event: "事件", item: "物品", organization: "组织", rule: "规则", player_trait: "玩家特质" }[type] || type;
+    return { character: "角色", location: "地点", event: "事件", item: "物品", organization: "组织", rule: "规则", player_trait: "玩家特质", goal: "目标" }[type] || type;
 }
 
 function clearEntityEditor() {
@@ -3040,7 +3193,9 @@ elements.presetForm.addEventListener("submit", savePreset);
 elements.drawingPresetForm.addEventListener("submit", saveDrawingPreset);
 elements.capabilitySettingsForm.addEventListener("submit", saveCapabilitySettings);
 elements.capabilitySettingsForm.addEventListener("input", () => { state.capabilitySettingsDirty = true; });
+document.querySelectorAll("[data-capability-panel]").forEach((button) => button.addEventListener("click", () => selectCapabilityPanel(button)));
 elements.runtimeSettingsForm.addEventListener("submit", saveRuntimeSettings);
+$("#ai-fallback-form").addEventListener("submit", saveAiFallbackSettings);
 elements.networkSettingsForm.addEventListener("submit", saveNetworkSettings);
 $("#network-mode").addEventListener("change", updateNetworkFields);
 elements.deleteConfirmationForm.addEventListener("submit", async (event) => {
@@ -3078,7 +3233,11 @@ elements.nextScenarioPage.addEventListener("click", () => {
     state.newAdventure.scenarioPage += 1;
     renderScenarioPage();
 });
-elements.presetForm.addEventListener("input", () => { state.presetDirty = true; });
+elements.presetForm.addEventListener("input", (event) => {
+    state.presetDirty = true;
+    if (["provider", "base-url", "api-key"].includes(event.target.id)) resetModelOptions();
+    if (event.target.id === "model") updateGeminiThinkingFields(undefined, true);
+});
 $("#provider").addEventListener("change", () => {
     state.presetDirty = true;
     updateProviderFields(true);
@@ -3090,8 +3249,9 @@ $("#load-models-button").addEventListener("click", loadModels);
 $("#model-select").addEventListener("change", (event) => {
     if (!event.target.value) return;
     $("#model").value = event.target.value;
+    const levelReset = updateGeminiThinkingFields(undefined, true);
     state.presetDirty = true;
-    setPresetStatus(`已选择模型 ${event.target.value}，请保存 Preset`);
+    if (!levelReset) setPresetStatus(`已选择模型 ${event.target.value}，请保存 Preset`);
 });
 $("#test-preset-button").addEventListener("click", testPreset);
 for (const button of document.querySelectorAll("[data-settings-section]")) button.addEventListener("click", () => showSettingsSection(button.dataset.settingsSection));

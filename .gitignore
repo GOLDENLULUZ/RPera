@@ -1,10 +1,12 @@
 .venv/
 __pycache__/
 .pytest_cache/
+web/node_modules/
 *.py[cod]
 /config/
 /saves/
 /.deleted_saves/
+/dist/
 /data/.content-staging/
 /data/worlds/*
 !/data/worlds/雾港/

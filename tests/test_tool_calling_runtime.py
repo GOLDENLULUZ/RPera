@@ -16,6 +16,7 @@ from rpera.agents import (
     ReportRef,
     StylePlanningReport,
     TaskToolInput,
+    TextReport,
     WorldResearchReport,
 )
 from rpera.capabilities import CapabilityRegistry
@@ -32,6 +33,7 @@ def test_agent_catalog_order_and_capabilities_are_declared_once() -> None:
         "location_designer",
         "compliance_reviewer",
         "EroticOrNot",
+        "goal_keeper",
         "role_player",
         "style_planner",
         "narrator",
@@ -45,32 +47,43 @@ def test_agent_catalog_order_and_capabilities_are_declared_once() -> None:
         "location_designer",
         "compliance_reviewer",
         "EroticOrNot",
+        "goal_keeper",
         "role_player",
         "style_planner",
         "narrator",
         "consistency_checker",
     }
-    assert {agent.name for agent in AGENTS.report_producing_children()} == {agent.name for agent in AGENTS.children()}
+    assert {agent.name for agent in AGENTS.report_producing_children()} == {agent.name for agent in AGENTS.children()} - {"goal_keeper"}
     assert AGENTS.main().produces_reports is False
 
     assert [agent.name for agent in sorted(AGENTS.children(), key=lambda agent: agent.template_order)] == [
+        "compliance_reviewer",
         "story_summarizer",
         "world_researcher",
         "character_designer",
         "location_designer",
-        "compliance_reviewer",
         "EroticOrNot",
+        "goal_keeper",
         "role_player",
         "style_planner",
         "narrator",
         "consistency_checker",
     ]
-    assert AGENTS.get("world_researcher").allowed_capabilities == frozenset({"entity_search", "entity_read", "research_report"})
-    assert AGENTS.get("story_summarizer").allowed_capabilities == frozenset({"story_summary_read", "story_summary_edit", "story_history_read"})
-    assert AGENTS.get("role_player").allowed_capabilities == frozenset()
-    assert AGENTS.get("EroticOrNot").allowed_capabilities == frozenset()
-    assert AGENTS.get("compliance_reviewer").allowed_capabilities == frozenset()
-    assert AGENTS.get("consistency_checker").allowed_capabilities == frozenset({"file_read"})
+    shared_reads = {"entity_read", "report_read"}
+    assert AGENTS.get("world_researcher").allowed_capabilities == frozenset(shared_reads | {"entity_search", "research_report"})
+    assert AGENTS.get("story_summarizer").allowed_capabilities == frozenset(shared_reads | {"story_summary_read", "story_summary_edit", "story_history_read"})
+    assert AGENTS.get("role_player").allowed_capabilities == frozenset(shared_reads | {"role_report"})
+    assert AGENTS.get("EroticOrNot").allowed_capabilities == frozenset(shared_reads | {"erotic_report"})
+    assert TextReport(report="完整意见").model_dump() == {"report": "完整意见"}
+    with pytest.raises(ValidationError):
+        TextReport(report=" ")
+    with pytest.raises(ValidationError):
+        TextReport(report="意见", category="不需要第二个字段")  # type: ignore[call-arg]
+    assert AGENTS.get("goal_keeper").allowed_capabilities == frozenset(shared_reads | {"goal_read", "goal_create", "goal_edit"})
+    assert AGENTS.get("goal_keeper").produces_reports is False
+    assert AGENTS.get("compliance_reviewer").allowed_capabilities == frozenset(shared_reads | {"compliance_report"})
+    assert AGENTS.get("consistency_checker").allowed_capabilities == frozenset(shared_reads | {"file_read", "narrative_token_count"})
+    assert all(shared_reads <= spec.allowed_capabilities for spec in AGENTS.children())
     assert "image_read" in AGENTS.get("character_designer").allowed_capabilities
     assert all(
         "image_read" not in agent.allowed_capabilities
@@ -129,6 +142,7 @@ def test_related_entity_schemas_reject_ambiguous_transfers() -> None:
     assert TaskToolInput(agent="style_planner", task="选择文风", related_entities=[path]).related_entities == [path]
     assert TaskToolInput(agent="character_designer", task="维护角色", related_entities=[path]).related_entities == [path]
     assert TaskToolInput(agent="location_designer", task="维护地点", related_entities=[path]).related_entities == [path]
+    assert TaskToolInput(agent="goal_keeper", task="维护目标", related_entities=[path]).related_entities == [path]
     assert CharacterChangeReport(report="无需长期变更").related_entities == []
     assert CharacterChangeReport(report="完成更名", related_entities=[path]).related_entities == [path]
     location_path = "entities/location/暮潮旅店/ENTITY.md"
@@ -138,7 +152,7 @@ def test_related_entity_schemas_reject_ambiguous_transfers() -> None:
     assert StylePlanningReport(report="适合克制表达", style_paths=[style]).style_paths == [style]
     assert TaskToolInput(agent="narrator", task="写故事", style_paths=[style]).style_paths == [style]
 
-    with pytest.raises(ValidationError, match="只能传递给 character_designer、location_designer、EroticOrNot、role_player、style_planner 或 narrator"):
+    with pytest.raises(ValidationError, match="只能显式传递给允许接收实体的子代理"):
         TaskToolInput(agent="world_researcher", task="调查", related_entities=[path])
     with pytest.raises(ValidationError, match="不能重新传递"):
         TaskToolInput(agent="narrator", task="修改", task_id="existing", related_entities=[path])
