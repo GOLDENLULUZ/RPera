@@ -87,8 +87,14 @@ def test_multipart_turn_persists_images_and_sends_provider_independent_blocks(tm
         for message in model.requests[0]
         if message["role"] == "user" and isinstance(message["content"], list)
     )
-    assert [block["type"] for block in user_content] == ["image_url"] * 5
-    for block, data in zip(user_content, uploaded, strict=True):
+    assert [block["type"] for block in user_content] == ["text", "image_url"] * 5
+    for label, image in zip(user_content[::2], turn["images"], strict=True):
+        reference = json.loads(label["text"])
+        assert reference == {"source": "player", "image_id": image["id"], "path": f"artifacts/{image['id']}.png"}
+        assert app.state.saves.read_image_artifact(save["id"], reference["path"])["data"] == (
+            base64.b64encode(uploaded[image["position"]]).decode("ascii")
+        )
+    for block, data in zip(user_content[1::2], uploaded, strict=True):
         assert block["image_url"]["url"] == f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
 
 
@@ -135,9 +141,13 @@ def test_completed_turn_images_follow_the_existing_history_window(tmp_path: Path
     users = [message for message in rebuilt if message["role"] == "user"]
     assert len(users) == 2
     assert users[0]["content"][0] == {"type": "text", "text": "先看这张"}
-    assert users[0]["content"][1]["image_url"]["url"].endswith(base64.b64encode(old_image).decode("ascii"))
+    old_reference = {"source": "player", "image_id": first.images[0].id, "path": f"artifacts/{first.images[0].id}.png"}
+    current_reference = {"source": "player", "image_id": second.images[0].id, "path": f"artifacts/{second.images[0].id}.png"}
+    assert json.loads(users[0]["content"][1]["text"]) == old_reference
+    assert users[0]["content"][2]["image_url"]["url"].endswith(base64.b64encode(old_image).decode("ascii"))
     assert users[1]["content"][0] == {"type": "text", "text": "再看这张"}
-    assert users[1]["content"][1]["image_url"]["url"].endswith(base64.b64encode(current_image).decode("ascii"))
+    assert json.loads(users[1]["content"][1]["text"]) == current_reference
+    assert users[1]["content"][2]["image_url"]["url"].endswith(base64.b64encode(current_image).decode("ascii"))
     assert any(message == {"role": "assistant", "content": "第一段故事"} for message in rebuilt)
 
     child_rebuilt = app.state.runtime.runner._provider_messages(
@@ -150,7 +160,9 @@ def test_completed_turn_images_follow_the_existing_history_window(tmp_path: Path
     child_users = [message for message in child_rebuilt if message["role"] == "user"]
     child_story = json.loads(child_users[0]["content"][0]["text"])["story"]
     assert [turn["turn_number"] for turn in child_story["turns"]] == [1, 2]
+    assert json.loads(child_users[0]["content"][1]["text"]) == old_reference
     assert child_users[0]["content"][2]["image_url"]["url"].endswith(base64.b64encode(old_image).decode("ascii"))
+    assert json.loads(child_users[0]["content"][3]["text"]) == current_reference
     assert child_users[0]["content"][4]["image_url"]["url"].endswith(base64.b64encode(current_image).decode("ascii"))
 
     saves.fail_turn(save.id, second.id, "turn.failed", {"message": "测试失败"})
@@ -163,7 +175,24 @@ def test_completed_turn_images_follow_the_existing_history_window(tmp_path: Path
         image_reader=saves.read_turn_image_data,
     )
     retried_users = [message for message in retried if message["role"] == "user"]
-    assert retried_users[1]["content"][1]["image_url"]["url"].endswith(base64.b64encode(current_image).decode("ascii"))
+    assert json.loads(retried_users[1]["content"][1]["text"]) == current_reference
+    assert retried_users[1]["content"][2]["image_url"]["url"].endswith(base64.b64encode(current_image).decode("ascii"))
+    retried_child = AgentRunner._provider_messages(
+        [], saves.load_story(save.id, second.id), save.id,
+        image_reader=saves.read_turn_image_data,
+    )
+    assert json.loads(retried_child[0]["content"][3]["text"]) == current_reference
+    history = saves.read_story_history(save.id, second.id, 0)
+    history_session = [{"role": "assistant", "model": "{}", "parts": [{
+        "type": "tool", "tool_name": "story_history_read", "provider_call_id": "history-image",
+        "state": "completed", "output": json.dumps(history), "input": "{}",
+    }]}]
+    history_messages = AgentRunner._provider_messages(
+        history_session, saves.load_story(save.id, second.id), save.id,
+        image_reader=saves.read_turn_image_data,
+    )
+    assert json.loads(history_messages[-1]["content"][1]["text"]) == old_reference
+    assert history_messages[-1]["content"][2]["image_url"]["url"].endswith(base64.b64encode(old_image).decode("ascii"))
 
 
 @pytest.mark.parametrize("image_format", ["GIF", "WEBP"])
@@ -194,5 +223,5 @@ def test_invalid_or_unsupported_persisted_image_reference_fails_explicitly() -> 
             "save",
             "",
             [{"id": "old-image"}],
-            lambda _save, _image: {"mime_type": "image/gif", "data": "aGVsbG8="},
+            lambda _save, _image: {"path": "artifacts/old-image.gif", "mime_type": "image/gif", "data": "aGVsbG8="},
         )

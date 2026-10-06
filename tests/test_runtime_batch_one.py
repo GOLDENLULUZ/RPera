@@ -23,7 +23,7 @@ from rpera.models import ModelResult, RuntimeSettings, SaveCreate, ToolCall
 from rpera.providers import ModelClient
 from rpera.runtime import AgentRunner, _thread as runtime_thread
 from rpera.storage import TurnRetryError
-from tests.helpers import make_data_dir, wait_for_turn
+from tests.helpers import make_data_dir, make_symlink, wait_for_turn
 from tests.prompt_fixtures import COMPLIANCE_REVIEWER_PROMPT, CONSISTENCY_CHECKER_PROMPT, COORDINATOR_PROMPT, EROTIC_OR_NOT_PROMPT, NARRATOR_PROMPT, PROMPT_TEMPLATES, ROLE_PLAYER_PROMPT, STYLE_PLANNER_PROMPT, WORLD_RESEARCHER_PROMPT
 
 
@@ -856,7 +856,7 @@ def test_required_entities_automatically_reach_all_transfer_receivers_without_re
 @pytest.mark.parametrize(("agent", "prompt", "tool_name"), [
     ("EroticOrNot", EROTIC_OR_NOT_PROMPT, "erotic_report"),
     ("role_player", ROLE_PLAYER_PROMPT, "role_report"),
-])
+], ids=["erotic", "role"])
 def test_text_report_agents_require_their_report_tool(
     tmp_path: Path, agent: str, prompt: str, tool_name: str
 ) -> None:
@@ -904,7 +904,7 @@ def test_single_file_tools_reject_unsafe_files_and_edit_exactly_once(tmp_path: P
 
     target = root / "target.md"
     target.write_text("target", encoding="utf-8")
-    (root / "link.md").symlink_to(target)
+    make_symlink(root / "link.md", target)
     with pytest.raises(DraftFileError, match="符号链接"):
         files.read("link.md")
 
@@ -1186,7 +1186,7 @@ def test_compliance_reviewer_uses_fixed_response_without_model_call_and_passes_r
     assert model.role_payload is not None
     document = model.role_payload["report_documents"][0]
     assert document["source_agent"] == "compliance_reviewer"
-    assert json.loads(document["content"]) == {
+    assert document["content"] == {
         "approved": approved,
         "reason": reason,
     }
@@ -1248,7 +1248,7 @@ def test_compliance_reviewer_uses_ai_by_default_and_submits_structured_report(tm
         turn = wait_for_turn(client, save["id"])
 
     assert turn["status"] == "completed"
-    assert model.compliance_tools == {"entity_read", "report_read", "compliance_report", "story_summary_read"}
+    assert model.compliance_tools == {"report_read", "compliance_report", "story_summary_read"}
     assert model.report == {"approved": False, "reason": "交由主代理决定"}
     events = app.state.saves.list_events(save["id"])
     assert any(
@@ -1969,7 +1969,7 @@ from pathlib import Path
 import rpera.draft_files as module
 
 root, marker, window = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
-original = module.os.replace
+original = module.atomic_replace
 def controlled_replace(source, target):
     if window == "before":
         marker.write_text("ready", encoding="utf-8")
@@ -1977,7 +1977,7 @@ def controlled_replace(source, target):
     original(source, target)
     marker.write_text("ready", encoding="utf-8")
     while True: time.sleep(1)
-module.os.replace = controlled_replace
+module.atomic_replace = controlled_replace
 module.DraftFileStore(root).edit("narrative.md", "old", "new")
 """
     process = subprocess.Popen([sys.executable, "-c", script, str(root), str(marker), window])

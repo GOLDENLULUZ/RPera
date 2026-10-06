@@ -22,18 +22,27 @@ def package(entries: list[tuple[str | ZipInfo, bytes]]) -> bytes:
     output = BytesIO()
     with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
         for name, data in entries:
-            archive.writestr(name, data)
+            if isinstance(name, str):
+                member = ZipInfo(name)
+                # ZipInfo normalizes Windows separators; preserve intentionally
+                # malformed test paths so the importer receives the real input.
+                member.filename = name
+                member.compress_type = ZIP_DEFLATED
+            else:
+                member = name
+            archive.writestr(member, data)
     return output.getvalue()
 
 
 @pytest.mark.parametrize("plural", ["worlds", "mods"])
-def test_archive_round_trip_preserves_bytes_and_can_create_adventure(tmp_path: Path, plural: str) -> None:
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_archive_round_trip_preserves_bytes_and_can_create_adventure(tmp_path: Path, plural: str, newline: str) -> None:
     data_dir = tmp_path / "data"
     prefix = f"{plural}/雾港"
     documents = {
         "description.md": "中文简介\r\n".encode(),
-        "scenarios/初见.md": "---\ndescription: 雨夜\n---\n\n雨落下来。\n".encode(),
-        "entities/character/旅人/ENTITY.md": "---\naliases: [客人]\nrequired: true\n---\n\n详细设定\n".encode(),
+        "scenarios/初见.md": "---\ndescription: 雨夜\n---\n\n雨落下来。\n".replace("\n", newline).encode(),
+        "entities/character/旅人/ENTITY.md": "---\naliases: [客人]\nrequired: true\n---\n\n详细设定\n".replace("\n", newline).encode(),
     }
     data = package([(f"{prefix}/{name}", body) for name, body in documents.items()])
     with TestClient(create_app(data_dir=data_dir)) as client:

@@ -167,7 +167,7 @@ def test_openai_protocol_switch_drops_only_foreign_native_content() -> None:
     story = {"story": {"opening": "", "turns": [{"turn_number": 1, "player": {"content": "继续", "images": []}, "has_ai_output": False}]}}
     native = {"output": [{"id": "rs_1", "type": "reasoning", "encrypted_content": "opaque"}, {"type": "function_call", "call_id": "call_1", "name": "noop", "arguments": "{}"}]}
     messages = [
-        {"role": "user", "model": None, "parts": [{"type": "text", "content": "任务"}]},
+        {"role": "user", "model": None, "parts": [{"type": "text", "content": json.dumps({"task": {"task": "任务"}}, ensure_ascii=False)}]},
         {"role": "assistant", "model": json.dumps({"provider": "openai_compatible", "openai_protocol": "responses", "xai_protocol": "responses", "provider_content": native}),
          "parts": [{"type": "tool", "content": None, "provider_call_id": "call_1", "tool_name": "noop", "input": "{}", "state": "completed", "output": '{"ok":true}'}]},
     ]

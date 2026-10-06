@@ -62,7 +62,7 @@ def test_custom_save_settings_reach_both_agents_after_retry_and_do_not_leak(tmp_
         "play_mode": "director",
         "narrative_person": "first",
         "language": "ja",
-        "other_requirements": "由伊蕾自述，不要加入玩家角色。",
+        "other_requirements": '由伊蕾自述，不要加入玩家角色。\n保留 "对白" 与 C:\\Users。',
     }
     with TestClient(app) as client:
         invalid = client.post("/api/saves", json={"world_name": "雾港", "name": "非法选项", "language": "fr"})

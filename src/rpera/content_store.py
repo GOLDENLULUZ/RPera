@@ -13,6 +13,7 @@ from typing import Any, Literal
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
 from .content_archive import ARCHIVE_CONTENT_LIMIT, ARCHIVE_ENTRY_LIMIT, ARCHIVE_UPLOAD_LIMIT, archive_path, validate_member
+from .filesystem import atomic_replace, sync_directory
 
 from .content import (
     ENTITY_DOCUMENT_LIMIT,
@@ -412,7 +413,7 @@ class ContentStore:
                 self._write_new(staging / "ENTITY.md", serialize_entity_document(empty).encode("utf-8"))
                 self._sync_directory(staging)
                 target = type_dir / request.name
-                os.replace(staging, target)
+                atomic_replace(staging, target)
                 self._sync_directory(type_dir)
                 self._sync_directory(self.staging_dir)
             finally:
@@ -692,7 +693,7 @@ class ContentStore:
     def _rename(self, source: Path, target: Path) -> None:
         if target.exists() or target.is_symlink():
             raise ContentConflictError(f"目标名称已存在：{target.name}")
-        os.replace(source, target)
+        atomic_replace(source, target)
         self._sync_directory(source.parent)
         if target.parent != source.parent:
             self._sync_directory(target.parent)
@@ -700,7 +701,7 @@ class ContentStore:
     def _remove_active(self, path: Path) -> None:
         self._prepare_private_dirs()
         deleted = self.deleted_dir / f"{path.name}-{uuid.uuid4()}"
-        os.replace(path, deleted)
+        atomic_replace(path, deleted)
         self._sync_directory(path.parent)
         self._sync_directory(self.deleted_dir)
         self._cleanup_hidden(deleted)
@@ -709,7 +710,7 @@ class ContentStore:
         temporary = path.parent / f".{path.name}.{uuid.uuid4()}.tmp"
         try:
             self._write_new(temporary, text.encode("utf-8"))
-            os.replace(temporary, path)
+            atomic_replace(temporary, path)
             self._sync_directory(path.parent)
         finally:
             self._cleanup_hidden(temporary)
@@ -785,11 +786,7 @@ class ContentStore:
 
     @staticmethod
     def _sync_directory(path: Path) -> None:
-        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        sync_directory(path)
 
     @staticmethod
     def _source_relative_path(kind: SourceKind, name: str) -> str:

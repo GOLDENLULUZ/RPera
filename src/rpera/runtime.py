@@ -18,6 +18,7 @@ from .content_store import ContentStore
 from .draft_files import DraftFileStore
 from .message_compat import image_block
 from .model_errors import ModelFallbackError
+from .model_text import render_model_text
 from .models import CharacterPortraitGenerationSettings, DrawingPreset, NarrativeTokenCountingSettings, NetworkSettings, RuntimeEvent, RuntimeSettings, SaveSummary
 from .prompt_store import NARRATIVE_TOKEN_LIMIT_PLACEHOLDER, PromptSnapshot, PromptStore, render_save_narrative_settings
 from .providers import FallbackModelClient, ModelClient
@@ -1025,7 +1026,8 @@ class AgentRunner:
             if message["role"] == "user":
                 if coordinator and index == 0:
                     continue
-                converted.append({"role": "user", "content": text})
+                # Child task envelopes remain JSON in the session fact source.
+                converted.append({"role": "user", "content": render_model_text(json.loads(text))})
                 continue
             tool_parts = [part for part in parts if part["type"] == "tool"]
             reasoning_parts = [part for part in parts if part["type"] == "reasoning"]
@@ -1041,6 +1043,8 @@ class AgentRunner:
                 model = json.loads(message["model"] or "{}")
             except (json.JSONDecodeError, TypeError):
                 model = {}
+            if isinstance(model, dict) and model.get("response_source") == "fixed_file" and text:
+                assistant["content"] = render_model_text(json.loads(text))
             if (isinstance(model, dict) and isinstance(model.get("provider_content"), dict)
                 and (target_model is None or (
                     model.get("provider") == target_model.get("provider")
@@ -1059,22 +1063,23 @@ class AgentRunner:
             converted.append(assistant)
             for part in tool_parts:
                 if part["state"] in {"completed", "error"}:
-                    content: Any = part["output"] or "{}"
+                    stored_output = part["output"] or "{}"
+                    content: Any
                     if part["tool_name"] == "image_read" and part["state"] == "completed":
                         try:
-                            image = json.loads(content)
+                            image = json.loads(stored_output)
                         except (json.JSONDecodeError, TypeError) as error:
                             raise RuntimeError("已完成的 image_read 结果不是合法 JSON") from error
                         if not isinstance(image, dict) or not isinstance(image.get("data"), str) or not isinstance(image.get("mime_type"), str):
                             raise RuntimeError("已完成的 image_read 结果缺少图片数据")
                         metadata = {key: value for key, value in image.items() if key != "data"}
                         content = [
-                            {"type": "text", "text": json.dumps(metadata, ensure_ascii=False)},
+                            {"type": "text", "text": render_model_text(metadata)},
                             image_block(image["mime_type"], image["data"]),
                         ]
                     elif part["tool_name"] == "character_portrait_generate" and part["state"] == "completed":
                         try:
-                            metadata = json.loads(content)
+                            metadata = json.loads(stored_output)
                         except (json.JSONDecodeError, TypeError) as error:
                             raise RuntimeError("已完成的角色立绘生成结果不是合法 JSON") from error
                         if not isinstance(metadata, dict) or not isinstance(metadata.get("path"), str):
@@ -1085,12 +1090,12 @@ class AgentRunner:
                         if image.get("sha256") != metadata.get("sha256"):
                             raise RuntimeError("角色立绘 artifact 的内容与已完成 Tool Result 不一致")
                         content = [
-                            {"type": "text", "text": json.dumps(metadata, ensure_ascii=False)},
+                            {"type": "text", "text": render_model_text(metadata)},
                             image_block(str(image["mime_type"]), str(image["data"])),
                         ]
                     elif part["tool_name"] == "story_history_read" and part["state"] == "completed":
                         try:
-                            history = json.loads(content)
+                            history = json.loads(stored_output)
                             references = [
                                 (turn, image["id"], source)
                                 for turn in history["turns"]
@@ -1102,6 +1107,7 @@ class AgentRunner:
                             ]
                         except (json.JSONDecodeError, TypeError, KeyError) as error:
                             raise RuntimeError("已完成的 story_history_read 结果无效") from error
+                        content = render_model_text(history)
                         if references:
                             blocks: list[dict[str, Any]] = [{"type": "text", "text": content}]
                             for turn, image_id, source in references:
@@ -1109,17 +1115,29 @@ class AgentRunner:
                                 if reader is None:
                                     raise RuntimeError("缺少历史回合图片读取器")
                                 image = reader(save_id, image_id)
-                                reference = {"image_id": image_id} if source == "player" else {
+                                reference = {"source": "player", "image_id": image_id, "path": image["path"]} if source == "player" else {
                                     "turn_number": turn["turn_number"], "source": "generated", "image_id": image_id,
                                 }
-                                blocks.append({"type": "text", "text": json.dumps(reference, ensure_ascii=False)})
+                                blocks.append({"type": "text", "text": render_model_text(reference)})
                                 blocks.append(image_block(image["mime_type"], image["data"]))
                             content = blocks
+                    elif part["tool_name"] == "report_read" and part["state"] == "completed":
+                        reports = json.loads(stored_output)
+                        # Compliance reports have a structured result serialized
+                        # inside content; unfold that known schema, not arbitrary
+                        # JSON-looking file bodies or text authored by an Agent.
+                        for report in reports["report_documents"]:
+                            if report["source_agent"] == "compliance_reviewer":
+                                report["content"] = json.loads(report["content"])
+                        content = render_model_text(reports)
+                    else:
+                        content = render_model_text(json.loads(stored_output))
                     converted.append({
                         "role": "tool",
                         "tool_call_id": part["provider_call_id"],
                         "content": content,
                         "_tool_error": part["state"] == "error",
+                        "_plain_text_result": True,
                     })
         return converted
 
@@ -1165,6 +1183,7 @@ class AgentRunner:
                             f"第 {turn['turn_number']} 回合 AI 生成的图片（非玩家上传）：",
                             generated,
                             generated_reader,
+                            source="generated",
                         ),
                         "_separate_next_user": index + 1 < len(story["turns"]),
                     })
@@ -1180,7 +1199,7 @@ class AgentRunner:
             )
             for image in images
         ]
-        serialized = json.dumps(value, ensure_ascii=False)
+        serialized = render_model_text(value)
         if not references:
             return [{"role": "user", "content": serialized, "_separate_next_user": True}]
         content: list[dict[str, Any]] = [{"type": "text", "text": serialized}]
@@ -1191,10 +1210,10 @@ class AgentRunner:
             image = reader(save_id, reference["id"])
             if not isinstance(image, dict) or not isinstance(image.get("mime_type"), str) or not isinstance(image.get("data"), str):
                 raise RuntimeError("回合图片读取结果缺少图片数据")
-            label = {"image_id": reference["id"]} if source == "player" else {
+            label = {"source": "player", "image_id": reference["id"], "path": image["path"]} if source == "player" else {
                 "turn_number": turn["turn_number"], "source": "generated", "image_id": reference["id"],
             }
-            content.append({"type": "text", "text": json.dumps(label, ensure_ascii=False)})
+            content.append({"type": "text", "text": render_model_text(label)})
             content.append(image_block(image["mime_type"], image["data"]))
         return [{"role": "user", "content": content, "_separate_next_user": True}]
 
@@ -1204,6 +1223,8 @@ class AgentRunner:
         text: str,
         references: Any,
         image_reader: Callable[[str, str], dict[str, str]] | None,
+        *,
+        source: str = "player",
     ) -> str | list[dict[str, Any]]:
         if references is None or references == []:
             return text
@@ -1220,6 +1241,10 @@ class AgentRunner:
             image = image_reader(save_id, reference["id"])
             if not isinstance(image, dict) or not isinstance(image.get("mime_type"), str) or not isinstance(image.get("data"), str):
                 raise RuntimeError("回合图片读取结果缺少图片数据")
+            if source == "player":
+                content.append({"type": "text", "text": render_model_text({
+                    "source": "player", "image_id": reference["id"], "path": image["path"],
+                })})
             content.append(image_block(image["mime_type"], image["data"]))
         return content
 

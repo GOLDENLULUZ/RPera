@@ -225,6 +225,12 @@ main { width: min(1120px, calc(100% - 36px)); margin: 0 auto; }
 .trace-reference-list { margin: 0; padding-left: 18px; }
 .trace-reference-list li + li { margin-top: 4px; }
 .trace-result > .trace-section + .trace-section { padding-top: 14px; border-top: 1px solid var(--line); }
+.trace-story-summary > .trace-text { white-space: normal; }
+.trace-summary-path { margin-bottom: 12px; color: var(--dim); font-size: 0.82em; overflow-wrap: anywhere; }
+.trace-story-summary > .trace-text > .trace-section { padding: 10px 0; }
+.trace-story-summary > .trace-text > .trace-section + .trace-section { margin-top: 0; border-top: 1px solid var(--line); }
+.trace-story-summary > .trace-text > .trace-section > .trace-section-title { color: var(--white); }
+.trace-raw-detail > .trace-data { margin-top: 8px; }
 
 .settings-page { padding: 48px 0; }
 .settings-page-head { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-bottom: 18px; border-bottom: 1px solid var(--strong-line); }

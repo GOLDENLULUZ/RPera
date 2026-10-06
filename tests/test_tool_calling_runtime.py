@@ -81,9 +81,10 @@ def test_agent_catalog_order_and_capabilities_are_declared_once() -> None:
         TextReport(report="意见", category="不需要第二个字段")  # type: ignore[call-arg]
     assert AGENTS.get("goal_keeper").allowed_capabilities == frozenset(shared_reads | {"goal_read", "goal_create", "goal_edit"})
     assert AGENTS.get("goal_keeper").produces_reports is False
-    assert AGENTS.get("compliance_reviewer").allowed_capabilities == frozenset(shared_reads | {"compliance_report"})
+    assert AGENTS.get("compliance_reviewer").allowed_capabilities == frozenset({"report_read", "compliance_report"})
     assert AGENTS.get("consistency_checker").allowed_capabilities == frozenset(shared_reads | {"file_read", "narrative_token_count"})
-    assert all(shared_reads <= spec.allowed_capabilities for spec in AGENTS.children())
+    assert all("report_read" in spec.allowed_capabilities for spec in AGENTS.children())
+    assert all(shared_reads <= spec.allowed_capabilities for spec in AGENTS.children() if spec.name != "compliance_reviewer")
     assert "image_read" in AGENTS.get("character_designer").allowed_capabilities
     assert all(
         "image_read" not in agent.allowed_capabilities

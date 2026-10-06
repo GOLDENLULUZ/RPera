@@ -153,11 +153,16 @@ def _contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             raw_content = message.get("content")
             blocks = content_blocks(raw_content) if isinstance(raw_content, list) else []
             text = "".join(block["text"] for block in blocks if block["type"] == "text")
-            response = _json_object(text if blocks else raw_content)
+            # Gemini requires an object for functionResponse. Put the readable
+            # result in a native text part instead of nesting it in that object.
+            plain_text = message.get("_plain_text_result") is True
+            response = {"result": "工具结果见后续原文文本。"} if plain_text else _json_object(text if blocks else raw_content)
             function_response: dict[str, Any] = {"name": name, "response": response}
             if provider_id:
                 function_response["id"] = provider_id
             parts = [{"functionResponse": function_response}]
+            if plain_text:
+                parts.append({"text": text if blocks else raw_content})
             parts.extend(_content_parts([block for block in blocks if block["type"] == "image_url"]))
             converted.append({"role": "user", "parts": parts})
     return converted

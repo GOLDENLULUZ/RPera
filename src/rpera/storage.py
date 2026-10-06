@@ -9,7 +9,7 @@ import os
 import shutil
 import sqlite3
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from collections import defaultdict
 from collections.abc import Generator
 from datetime import UTC, datetime
@@ -36,6 +36,7 @@ from .content import (
     serialize_entity_document,
 )
 from .entities import EntityEntry, EntityStore
+from .filesystem import atomic_replace, sync_directory
 from .models import (
     EventPage,
     GeneratedImageSummary,
@@ -415,7 +416,7 @@ class SaveStore:
             self._write_save(staging_dir, save_data)
             self._initialize_database(state_dir / "state.sqlite3")
             self._copy_state(state_dir, staging_dir / "revisions" / "opening")
-            os.replace(staging_dir, save_dir)
+            atomic_replace(staging_dir, save_dir)
             return SaveSummary.model_validate(save_data)
         except Exception:
             shutil.rmtree(staging_dir, ignore_errors=True)
@@ -490,7 +491,7 @@ class SaveStore:
                     handle.write(data)
                     handle.flush()
                     os.fsync(handle.fileno())
-                os.replace(temporary, target)
+                atomic_replace(temporary, target)
                 published = True
                 self._sync_directory(artifacts)
             except Exception:
@@ -594,7 +595,7 @@ class SaveStore:
                 temporary.mkdir()
                 (temporary / "revisions").mkdir()
                 # Keep earlier checkpoints so the new timeline can branch again.
-                with sqlite3.connect(target_revision / "state.sqlite3") as db:
+                with closing(sqlite3.connect(target_revision / "state.sqlite3")) as db:
                     rows = db.execute("SELECT id, status FROM turns ORDER BY rowid").fetchall()
                 self._copy_state(revisions / "opening", temporary / "revisions" / "opening")
                 for row in rows:
@@ -614,7 +615,7 @@ class SaveStore:
                     "branch_source_save_name": origin_name, "branch_source_turn_number": len(rows),
                 })
                 self._write_save(temporary, data)
-                os.replace(temporary, target)
+                atomic_replace(temporary, target)
                 published = True
                 self._sync_directory(self.saves_dir)
                 return SaveSummary.model_validate(data)
@@ -647,7 +648,7 @@ class SaveStore:
             raise SaveBusyError("当前存档有正在执行的回合，无法删除")
 
         deleted_dir = self.deleted_saves_dir / f"{save_dir.name}-{uuid.uuid4()}"
-        os.replace(save_dir, deleted_dir)
+        atomic_replace(save_dir, deleted_dir)
         shutil.rmtree(deleted_dir)
 
     def searchable_entity_count(self, save_id: str) -> int:
@@ -713,7 +714,7 @@ class SaveStore:
                 self._sync_directory(staging)
                 if target.exists() or target.is_symlink():
                     raise SaveEntityConflictError(f"实体名称已存在：{checked_name}")
-                os.replace(staging, target)
+                atomic_replace(staging, target)
                 self._sync_directory(parent)
                 self._sync_directory(staging_root)
             finally:
@@ -769,7 +770,7 @@ class SaveStore:
                 return current
             if target.exists() or target.is_symlink():
                 raise SaveEntityConflictError(f"实体名称已存在：{checked_name}")
-            os.replace(source.parent, target)
+            atomic_replace(source.parent, target)
             self._sync_directory(source.parent.parent)
             if source.parent.parent != target_parent:
                 self._sync_directory(target_parent)
@@ -786,7 +787,7 @@ class SaveStore:
             staging = self._state_dir(save_id) / ".entity-staging"
             self._ensure_real_directory(staging)
             removed = staging / f"deleted-{uuid.uuid4()}"
-            os.replace(source.parent, removed)
+            atomic_replace(source.parent, removed)
             self._sync_directory(source.parent.parent)
             self._sync_directory(staging)
             shutil.rmtree(removed)
@@ -866,7 +867,7 @@ class SaveStore:
                 self._sync_directory(staging)
                 if target.exists() or target.is_symlink():
                     raise ValueError(f"实体名称已存在：{GOAL_ENTITY_NAME}")
-                os.replace(staging, target)
+                atomic_replace(staging, target)
                 self._sync_directory(goals)
                 self._sync_directory(staging_root)
             finally:
@@ -931,7 +932,7 @@ class SaveStore:
                 self._sync_directory(staging)
                 if target.exists() or target.is_symlink():
                     raise ValueError(f"实体名称已存在：{checked_name}")
-                os.replace(staging, target)
+                atomic_replace(staging, target)
                 self._sync_directory(characters)
                 self._sync_directory(staging_root)
             finally:
@@ -989,7 +990,7 @@ class SaveStore:
                 return self.read_entities_exact(save_id, [checked_path])[0]
             if target.exists() or target.is_symlink():
                 raise ValueError(f"实体名称已存在：{checked_name}")
-            os.replace(source, target)
+            atomic_replace(source, target)
             self._sync_directory(source.parent)
             parts = list(Path(checked_path).parts)
             parts[-2] = checked_name
@@ -1025,7 +1026,7 @@ class SaveStore:
                 self._sync_directory(staging)
                 if target.exists() or target.is_symlink():
                     raise ValueError(f"实体名称已存在：{checked_name}")
-                os.replace(staging, target)
+                atomic_replace(staging, target)
                 self._sync_directory(locations)
                 self._sync_directory(staging_root)
             finally:
@@ -1083,7 +1084,7 @@ class SaveStore:
                 return self.read_entities_exact(save_id, [checked_path])[0]
             if target.exists() or target.is_symlink():
                 raise ValueError(f"实体名称已存在：{checked_name}")
-            os.replace(source, target)
+            atomic_replace(source, target)
             self._sync_directory(source.parent)
             parts = list(Path(checked_path).parts)
             parts[-2] = checked_name
@@ -1165,7 +1166,7 @@ class SaveStore:
         temporary = path.parent / f".{path.name}.{uuid.uuid4()}.tmp"
         try:
             SaveStore._write_new_file(temporary, data)
-            os.replace(temporary, path)
+            atomic_replace(temporary, path)
             SaveStore._sync_directory(path.parent)
         finally:
             try:
@@ -1316,7 +1317,7 @@ class SaveStore:
                 initial = self._build_story(db, turn_id, context_turns, save.opening)
                 self._insert_text_message(db, root_session_id, "user", json.dumps(initial, ensure_ascii=False), now)
                 for temporary, target in staged:
-                    os.replace(temporary, target)
+                    atomic_replace(temporary, target)
                     finalized.append(target)
                 self._sync_directory(artifacts_dir)
         except sqlite3.IntegrityError as error:
@@ -1445,7 +1446,11 @@ class SaveStore:
         data = path.read_bytes()
         if len(data) != int(row["byte_size"]) or hashlib.sha256(data).hexdigest() != row["sha256"]:
             raise ValueError(f"回合图片内容与上传记录不一致：{image_id}")
-        return {"mime_type": str(row["mime_type"]), "data": base64.b64encode(data).decode("ascii")}
+        return {
+            "path": f"artifacts/{row['stored_name']}",
+            "mime_type": str(row["mime_type"]),
+            "data": base64.b64encode(data).decode("ascii"),
+        }
 
     def _turn_image_path(self, save_id: str, row: sqlite3.Row) -> Path:
         artifacts = self._state_dir(save_id) / "artifacts"
@@ -2258,12 +2263,13 @@ class SaveStore:
             return database_files.intersection(names) if Path(directory) == source else set()
 
         shutil.copytree(source, target, ignore=ignore)
-        with sqlite3.connect(source / "state.sqlite3") as original:
-            with sqlite3.connect(target / "state.sqlite3") as copy:
-                original.backup(copy)
+        with closing(sqlite3.connect(source / "state.sqlite3")) as original:
+            with closing(sqlite3.connect(target / "state.sqlite3")) as copy:
+                with copy:
+                    original.backup(copy)
         for path in target.rglob("*"):
             if path.is_file():
-                with path.open("rb") as stream:
+                with path.open("r+b" if os.name == "nt" else "rb") as stream:
                     os.fsync(stream.fileno())
         for path in sorted((item for item in target.rglob("*") if item.is_dir()), key=lambda item: len(item.parts), reverse=True):
             SaveStore._sync_directory(path)
@@ -2279,7 +2285,7 @@ class SaveStore:
         published = False
         try:
             self._copy_state(self._state_dir(save_id), temporary)
-            os.replace(temporary, target)
+            atomic_replace(temporary, target)
             published = True
             self._sync_directory(revisions)
         except Exception:
@@ -2292,8 +2298,9 @@ class SaveStore:
 
     @staticmethod
     def _initialize_database(path: Path) -> None:
-        with sqlite3.connect(path) as db:
-            db.executescript(SCHEMA)
+        with closing(sqlite3.connect(path)) as db:
+            with db:
+                db.executescript(SCHEMA)
 
     @staticmethod
     def _load_save(save_dir: Path) -> dict[str, Any]:
@@ -2303,15 +2310,11 @@ class SaveStore:
     def _write_save(save_dir: Path, save_data: dict[str, Any]) -> None:
         temporary = save_dir / "save.tmp"
         temporary.write_text(json.dumps(save_data, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(save_dir / "save.json")
+        atomic_replace(temporary, save_dir / "save.json")
 
     @staticmethod
     def _sync_directory(path: Path) -> None:
-        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        sync_directory(path)
 
     def _touch(self, save_id: str) -> None:
         with self._save_locks[save_id]:

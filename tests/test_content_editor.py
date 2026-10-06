@@ -14,7 +14,7 @@ import rpera.storage as storage_module
 from rpera.app import create_app
 from rpera.content import markdown_frontmatter, parse_scenario_document
 from rpera.entities import EntityStore
-from tests.helpers import wait_for_turn
+from tests.helpers import make_symlink, wait_for_turn
 from tests.test_prototype import ScriptedModelClient
 
 
@@ -243,8 +243,8 @@ def test_content_round_trips_boundaries_and_ignores_only_internal_temporary_file
 def test_content_rejects_broken_library_symlink_and_malformed_frontmatter(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    (data_dir / "worlds").symlink_to(tmp_path / "missing", target_is_directory=True)
-    (data_dir / "mods").symlink_to(tmp_path / "missing", target_is_directory=True)
+    make_symlink(data_dir / "worlds", tmp_path / "missing", target_is_directory=True)
+    make_symlink(data_dir / "mods", tmp_path / "missing", target_is_directory=True)
     with TestClient(create_app(data_dir=data_dir)) as client:
         assert client.get("/api/content/worlds").status_code == 400
         assert client.get("/api/worlds").status_code == 400
@@ -269,21 +269,21 @@ def test_content_rejects_broken_nested_symlinks(tmp_path: Path) -> None:
     app = create_app(data_dir=data_dir)
 
     description = world / "description.md"
-    description.symlink_to(missing)
+    make_symlink(description, missing)
     with TestClient(app) as client:
         assert client.get("/api/worlds").status_code == 400
         assert client.get("/api/content/worlds").status_code == 400
     description.unlink()
 
     scenarios = world / "scenarios"
-    scenarios.symlink_to(missing, target_is_directory=True)
+    make_symlink(scenarios, missing, target_is_directory=True)
     with TestClient(app) as client:
         assert client.get("/api/worlds").status_code == 400
         assert client.get("/api/content/worlds").status_code == 400
     scenarios.unlink()
 
     entities = world / "entities"
-    entities.symlink_to(missing, target_is_directory=True)
+    make_symlink(entities, missing, target_is_directory=True)
     with TestClient(app) as client:
         assert client.get("/api/content/worlds").status_code == 400
     try:
@@ -342,17 +342,17 @@ def test_atomic_save_and_shared_snapshot_lock_preserve_complete_versions(tmp_pat
         client.post("/api/content/worlds/锁世界/scenarios", json={"name": "开局"})
         client.put("/api/content/worlds/锁世界/scenarios/开局", json={"description": "", "opening": "旧序章"})
 
-        real_replace = content_store_module.os.replace
+        real_replace = content_store_module.atomic_replace
 
         def fail_description_replace(source: Any, target: Any) -> None:
             if Path(target).name == "description.md" and Path(source).name.endswith(".tmp"):
                 raise OSError("injected write failure")
             real_replace(source, target)
 
-        monkeypatch.setattr(content_store_module.os, "replace", fail_description_replace)
+        monkeypatch.setattr(content_store_module, "atomic_replace", fail_description_replace)
         response = client.put("/api/content/worlds/锁世界", json={"description": "不会写入"})
         assert response.status_code == 500
-        monkeypatch.setattr(content_store_module.os, "replace", real_replace)
+        monkeypatch.setattr(content_store_module, "atomic_replace", real_replace)
         assert client.get("/api/content/worlds/锁世界").json()["description"] == "旧简介"
 
     copied = Event()

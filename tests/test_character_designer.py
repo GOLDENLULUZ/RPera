@@ -18,7 +18,7 @@ from rpera.content import markdown_frontmatter
 from rpera.models import ModelResult, SaveCreate, ToolCall
 from rpera.runtime import AgentRunner, _redact_image_data
 from tests.prompt_fixtures import CHARACTER_DESIGNER_PROMPT, COORDINATOR_PROMPT, NARRATOR_PROMPT
-from tests.helpers import make_data_dir, wait_for_turn
+from tests.helpers import make_data_dir, make_symlink, wait_for_turn
 
 
 PROFILE = {
@@ -151,7 +151,8 @@ def test_character_file_replace_survives_real_process_exit_before_and_after_publ
                 "from rpera.storage import SaveStore\n"
                 "target, temporary, content = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]\n"
                 "SaveStore._write_new_file(temporary, content.encode('utf-8'))\n"
-                "os.replace(temporary, target)\n"
+                "from rpera.filesystem import atomic_replace\n"
+                "atomic_replace(temporary, target)\n"
                 "os._exit(9)\n"
             ),
             str(path),
@@ -178,7 +179,7 @@ def test_character_writes_reject_non_standard_json_and_snapshot_root_symlink(tmp
     mods = snapshot / "mods"
     moved_mods = snapshot / "moved-mods"
     mods.rename(moved_mods)
-    mods.symlink_to(moved_mods, target_is_directory=True)
+    make_symlink(mods, moved_mods, target_is_directory=True)
     with pytest.raises(ValueError, match="模组快照根路径必须是非符号链接目录"):
         app.state.saves.list_entities(save.id)
     mods.unlink()
@@ -186,7 +187,7 @@ def test_character_writes_reject_non_standard_json_and_snapshot_root_symlink(tmp
 
     moved = save_dir / "moved-snapshot"
     snapshot.rename(moved)
-    snapshot.symlink_to(moved, target_is_directory=True)
+    make_symlink(snapshot, moved, target_is_directory=True)
     original = (moved / "entities" / "character" / "伊蕾" / "ENTITY.md").read_text(encoding="utf-8")
     with pytest.raises(ValueError, match="快照根路径必须是非符号链接目录"):
         app.state.saves.edit_character(
@@ -384,7 +385,7 @@ def test_image_artifact_read_is_scoped_and_validates_real_content(tmp_path: Path
         app.state.saves.read_image_artifact(save.id, "artifacts/旧格式.gif")
 
     link = artifacts / "链接.png"
-    link.symlink_to(image)
+    make_symlink(link, image)
     with pytest.raises(ValueError, match="不存在或不是普通文件"):
         app.state.saves.read_image_artifact(save.id, "artifacts/链接.png")
 
@@ -397,6 +398,8 @@ class ImageCharacterFlowModel:
     def __init__(self, provider: str = "deepseek") -> None:
         self.image_observations = 0
         self.provider = provider
+        self.image_path = "artifacts/参考.png"
+        self.image_data = PNG_BYTES
 
     def bind(self):
         return self
@@ -422,7 +425,7 @@ class ImageCharacterFlowModel:
                     name="task",
                     arguments={
                         "agent": "character_designer",
-                        "task": "读取 artifacts/参考.png，并据此创建长期角色",
+                        "task": f"读取 {self.image_path}，并据此创建长期角色",
                     },
                 ))
             if len(completed) == 1:
@@ -438,14 +441,12 @@ class ImageCharacterFlowModel:
                 return self._result(ToolCall(
                     id="read-image",
                     name="image_read",
-                    arguments={"path": "artifacts/参考.png"},
+                    arguments={"path": self.image_path},
                 ))
             assert len(image_results) == 1
             blocks = image_results[0]["content"]
-            assert json.loads(blocks[0]["text"])["path"] == "artifacts/参考.png"
-            assert blocks[1]["image_url"]["url"] == (
-                "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode("ascii")
-            )
+            assert json.loads(blocks[0]["text"])["path"] == self.image_path
+            assert blocks[1]["image_url"]["url"].split(",", 1)[1] == base64.b64encode(self.image_data).decode("ascii")
             self.image_observations += 1
             if len(completed) == 1:
                 return self._result(ToolCall(id="search-before-create", name="entity_search", arguments={"query": "图片参考角色"}))
@@ -519,6 +520,69 @@ def test_image_read_persists_visual_context_and_redacts_observation_events(tmp_p
     assert "data" not in image_completed.payload["result"]
     image_requests = [event for event in events if event.type == "model.request" and event.payload["agent"] == "character_designer"]
     assert any("data:image/png;base64,[omitted]" in json.dumps(event.payload) for event in image_requests)
+
+
+class UploadedPortraitFlowModel(ImageCharacterFlowModel):
+    async def complete(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> ModelResult:
+        if system_prompt in {COORDINATOR_PROMPT, CHARACTER_DESIGNER_PROMPT}:
+            references = [
+                json.loads(block["text"])
+                for message in messages
+                if message["role"] == "user" and isinstance(message["content"], list)
+                for block in message["content"]
+                if block["type"] == "text" and block["text"].startswith("{")
+            ]
+            reference = next(item for item in references if item.get("source") == "player")
+            self.image_path = reference["path"]
+            assert reference["image_id"] in self.image_path
+            assert "character_portrait_generate" not in {tool["function"]["name"] for tool in tools or []}
+        result = await super().complete(system_prompt, messages, tools)
+        for call in result.tool_calls:
+            if call.name == "character_create":
+                call.arguments["profile"] = {**PROFILE, "portrait": self.image_path}
+        return result
+
+
+@pytest.mark.parametrize("image_format", ["PNG", "JPEG"])
+def test_uploaded_image_can_be_reused_as_portrait_without_generation(tmp_path: Path, image_format: str) -> None:
+    model = UploadedPortraitFlowModel()
+    output = BytesIO()
+    with Image.open(BytesIO(PNG_BYTES)) as image:
+        image.save(output, format=image_format)
+    model.image_data = output.getvalue()
+    app = create_app(data_dir=make_data_dir(tmp_path), model_client=model)
+    with TestClient(app) as client:
+        save = client.post("/api/saves", json={"world_name": "雾港", "name": "原图立绘"}).json()
+        response = client.post(
+            f"/api/saves/{save['id']}/turns",
+            data={"content": "请直接用上传的图片作为丹朱的立绘，不要重新绘制。"},
+            files=[("images", ("玩家原图", model.image_data, f"image/{image_format.lower()}"))],
+        )
+        assert response.status_code == 202
+        turn = wait_for_turn(client, save["id"])
+        assert turn["status"] == "completed"
+        assert turn["generated_images"] == []
+        assert client.get(turn["images"][0]["content_url"]).content == model.image_data
+
+    state_dir = app.state.saves.saves_dir / save["id"] / "current"
+    _, body = markdown_frontmatter(
+        (state_dir / "world_snapshot" / "entities" / "character" / "丹朱" / "ENTITY.md").read_text(encoding="utf-8"),
+        "角色",
+    )
+    portrait = json.loads(body)["portrait"]
+    assert portrait == model.image_path
+    assert (state_dir / portrait).read_bytes() == model.image_data
+    assert list((state_dir / "artifacts").iterdir()) == [state_dir / portrait]
+    assert model.image_observations == 3
+    assert not any(
+        event.type == "tool.completed" and event.payload.get("tool") == "character_portrait_generate"
+        for event in app.state.saves.list_events(save["id"])
+    )
 
 
 class ImageRetryFlowModel:

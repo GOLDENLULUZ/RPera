@@ -25,7 +25,7 @@ from rpera.runtime import AgentRunner
 from tests.prompt_fixtures import COORDINATOR_PROMPT, NARRATOR_PROMPT, TASK_DESCRIPTIONS, WORLD_RESEARCHER_PROMPT
 from rpera.storage import WorldLibrary
 from rpera.xai import request_payload as xai_request_payload
-from tests.helpers import make_data_dir, wait_for_turn
+from tests.helpers import make_data_dir, make_symlink, wait_for_turn
 
 
 class ScriptedModelClient:
@@ -150,11 +150,12 @@ def test_default_user_data_is_in_project_root(monkeypatch: pytest.MonkeyPatch, t
     custom_user_data = tmp_path / "custom-user-data"
     custom_user_data.mkdir(mode=0o750)
     custom_user_data.chmod(0o750)
+    permissions = custom_user_data.stat().st_mode
     monkeypatch.setenv("RPERA_USER_DATA_DIR", str(custom_user_data))
     overridden = create_app(model_client=ScriptedModelClient())
     assert overridden.state.user_data_dir == custom_user_data
     assert overridden.state.saves.saves_dir == custom_user_data / "saves"
-    assert custom_user_data.stat().st_mode & 0o777 == 0o750
+    assert custom_user_data.stat().st_mode == permissions
 
 
 def test_complete_agent_flow_and_save_isolation(tmp_path: Path) -> None:
@@ -1153,7 +1154,7 @@ def test_model_fallback_keeps_completed_tools_and_actual_model_metadata(tmp_path
 def test_cross_provider_fallback_does_not_replay_foreign_native_messages() -> None:
     story = {"story": {"opening": "", "turns": [{"turn_number": 1, "player": {"content": "继续", "images": []}, "has_ai_output": False}]}}
     messages = [
-        {"role": "user", "model": None, "parts": [{"type": "text", "content": "任务"}]},
+        {"role": "user", "model": None, "parts": [{"type": "text", "content": json.dumps({"task": {"task": "任务"}}, ensure_ascii=False)}]},
         {"role": "assistant", "model": json.dumps({
             "provider": "google_gemini", "xai_protocol": "responses",
             "provider_content": {"role": "model", "parts": [{"functionCall": {"name": "entity_search", "args": {"query": "伊蕾"}}, "thoughtSignature": "native-signature"}]},
@@ -2545,7 +2546,7 @@ def test_rejects_world_symlinks_and_blank_input(tmp_path: Path) -> None:
     data_dir = make_data_dir(tmp_path)
     outside = tmp_path / "secret.txt"
     outside.write_text("secret", encoding="utf-8")
-    (data_dir / "worlds" / "雾港" / "entities" / "escape.txt").symlink_to(outside)
+    make_symlink(data_dir / "worlds" / "雾港" / "entities" / "escape.txt", outside)
     app = create_app(data_dir=data_dir, model_client=ScriptedModelClient())
     with TestClient(app) as client:
         response = client.post(
@@ -2572,7 +2573,9 @@ def test_rejects_legacy_source_id_fields_and_unsafe_scenario_name(tmp_path: Path
         )
     assert legacy.status_code == 422
 
-    (data_dir / "worlds" / "雾港" / "scenarios" / "bad?.md").write_text("危险场景", encoding="utf-8")
+    # Leading spaces are invalid application names but can be created on both
+    # platforms, unlike '?' which Windows rejects before the scan can run.
+    (data_dir / "worlds" / "雾港" / "scenarios" / " bad.md").write_text("危险场景", encoding="utf-8")
     app = create_app(data_dir=data_dir, model_client=ScriptedModelClient())
     with TestClient(app) as client:
         response = client.post(
@@ -2580,7 +2583,7 @@ def test_rejects_legacy_source_id_fields_and_unsafe_scenario_name(tmp_path: Path
             json={"world_name": "雾港", "name": "不安全场景"},
         )
     assert response.status_code == 400
-    assert "名称包含跨平台文件名禁用字符" in response.json()["detail"]
+    assert "名称不能包含首尾空白" in response.json()["detail"]
 
 
 def test_content_name_contract_and_casefold_uniqueness(tmp_path: Path) -> None:
@@ -2594,7 +2597,7 @@ def test_content_name_contract_and_casefold_uniqueness(tmp_path: Path) -> None:
             content_name(invalid)
 
     worlds_dir = tmp_path / "worlds"
-    for name in ("Alpha", "alpha"):
+    for name in ("Straße", "STRASSE"):
         world = worlds_dir / name
         world.mkdir(parents=True)
     with pytest.raises(ValueError, match="世界名称重复"):
@@ -2604,13 +2607,13 @@ def test_content_name_contract_and_casefold_uniqueness(tmp_path: Path) -> None:
     linked_world = tmp_path / "outside-world"
     linked_world.mkdir()
     (linked_data / "worlds").mkdir(parents=True)
-    (linked_data / "worlds" / "外部世界").symlink_to(linked_world, target_is_directory=True)
+    make_symlink(linked_data / "worlds" / "外部世界", linked_world, target_is_directory=True)
     with pytest.raises(ValueError, match="世界根目录不允许使用符号链接"):
         WorldLibrary(linked_data).list_worlds()
 
     linked_root_data = tmp_path / "linked-root"
     linked_root_data.mkdir()
-    (linked_root_data / "worlds").symlink_to(linked_world, target_is_directory=True)
+    make_symlink(linked_root_data / "worlds", linked_world, target_is_directory=True)
     with pytest.raises(ValueError, match="世界库根目录不允许使用符号链接"):
         WorldLibrary(linked_root_data).list_worlds()
 

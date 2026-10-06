@@ -12,7 +12,7 @@ from rpera.app import create_app
 from rpera.models import ModelResult, SaveCreate, ToolCall
 from rpera.runtime import AgentRunner
 from rpera.story_summary import StorySummaryStore
-from tests.helpers import make_data_dir, wait_for_turn
+from tests.helpers import make_data_dir, wait_for_revision, wait_for_turn
 from tests.prompt_fixtures import COORDINATOR_PROMPT, NARRATOR_PROMPT, PROMPT_TEMPLATES
 
 
@@ -141,6 +141,10 @@ def test_second_turn_first_call_creates_file_and_backfills_beyond_recent_window(
         assert summary_file.exists()
         assert [item["turn_number"] for item in json.loads(summary_file.read_text(encoding="utf-8"))["turns"]] == [1]
         # A missing summary remains recoverable after the corresponding story leaves the recent-story window.
+        # Publication precedes checkpoint copying; wait before an external file
+        # edit, which otherwise races the copy's read handle on Windows.
+        second = client.get(f"/api/saves/{save_id}/turns").json()[-1]
+        wait_for_revision(app.state.saves.saves_dir / save_id / "revisions" / second["id"])
         summary_file.write_text('{"turns": []}\n', encoding="utf-8")
         play(client, save_id, 3)
         play(client, save_id, 4)
@@ -180,11 +184,16 @@ def test_historical_image_is_rebuilt_from_artifact_for_model() -> None:
     session = [{"role": "assistant", "model": "{}", "parts": [{"type": "tool", "tool_name": "story_history_read", "provider_call_id": "same", "state": "completed", "output": json.dumps(history), "input": "{}"}]}]
     data = base64.b64encode(b"picture data").decode("ascii")
     rebuilt = AgentRunner._provider_messages(
-        session, record, "save", image_reader=lambda _save_id, _image_id: {"mime_type": "image/png", "data": data},
+        session, record, "save", image_reader=lambda _save_id, _image_id: {
+            "path": "artifacts/picture.png", "mime_type": "image/png", "data": data,
+        },
     )
     content = rebuilt[-1]["content"]
     assert isinstance(content, list)
     assert content[0]["text"] == json.dumps(history)
+    assert json.loads(content[1]["text"]) == {
+        "source": "player", "image_id": "picture", "path": "artifacts/picture.png",
+    }
     assert any(block.get("type") == "image_url" or block.get("type") == "image" for block in content[1:])
 
 

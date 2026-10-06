@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -71,18 +72,17 @@ def is_internal_temporary_name(
 
 
 def markdown_frontmatter(text: str, subject: str) -> tuple[dict[str, Any], str]:
-    if not text.startswith("---\n"):
+    start = re.match(r"---\r?\n", text)
+    if start is None:
         return {}, text
-    end = text.find("\n---\n", 3)
-    marker_length = 5
-    if end == -1 and text.endswith("\n---"):
-        end = len(text) - 4
-        marker_length = 4
-    if end == -1:
+    end = re.search(r"^---(?:\r?\n|\Z)", text[start.end():], re.MULTILINE)
+    if end is None:
         raise ValueError(f"{subject} frontmatter 未闭合")
-    raw = text[3:end].strip()
-    body = text[end + marker_length :]
-    if body.startswith("\n"):
+    raw = text[start.end():start.end() + end.start()].strip()
+    body = text[start.end() + end.end():]
+    if body.startswith("\r\n"):
+        body = body[2:]
+    elif body.startswith("\n"):
         body = body[1:]
     try:
         parsed = yaml.safe_load(raw)
@@ -112,7 +112,7 @@ def entity_type(value: Any) -> str:
 def parse_scenario_document(text: str) -> tuple[str, str]:
     if len(text) > SCENARIO_DOCUMENT_LIMIT:
         raise ValueError("场景文件超过大小限制")
-    has_frontmatter = text.startswith("---\n")
+    has_frontmatter = text.startswith(("---\n", "---\r\n"))
     front, opening = markdown_frontmatter(text, "场景")
     unknown = set(front) - {"description"}
     if unknown:

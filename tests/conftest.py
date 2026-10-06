@@ -7,15 +7,17 @@ from uuid import UUID
 import pytest
 
 from rpera.runtime import AgentRunner
+from tests.model_text_helpers import decode_model_text
 
 
 @pytest.fixture(autouse=True)
 def scripted_model_projection(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep scripted-model tests focused on their existing assertions.
 
-    Context transfer tests exercise the actual provider-visible tool messages.
+    Context transfer and model-text tests exercise real provider-visible text.
+    Older scripted models retain their JSON input fixtures through this adapter.
     """
-    if request.node.path.name == "test_context_transfer.py":
+    if request.node.path.name in {"test_context_transfer.py", "test_model_text.py"}:
         return
 
     install_scripted_model_projection(monkeypatch)
@@ -37,6 +39,18 @@ def install_scripted_model_projection(monkeypatch: pytest.MonkeyPatch) -> None:
         messages = original_messages(*args, **kwargs)
         converted: list[dict[str, Any]] = []
         for message in messages:
+            message = dict(message)
+            content = message.get("content")
+            if isinstance(content, str) and content.startswith("$ — "):
+                message["content"] = json.dumps(decode_model_text(content), ensure_ascii=False)
+                message.pop("_plain_text_result", None)
+            elif isinstance(content, list):
+                message["content"] = [
+                    {**block, "text": json.dumps(decode_model_text(block["text"]), ensure_ascii=False)}
+                    if block.get("type") == "text" and block["text"].startswith("$ — ") else block
+                    for block in content
+                ]
+                message.pop("_plain_text_result", None)
             if message.get("role") == "assistant" and any(
                 call.get("function", {}).get("name") in {"entity_read", "report_read"}
                 and is_initial_call(str(call.get("id", "")))

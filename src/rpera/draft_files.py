@@ -6,6 +6,8 @@ import stat
 import uuid
 from pathlib import Path
 
+from .filesystem import atomic_replace, sync_directory
+
 
 _DIRECT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _MAX_FILE_BYTES = 2_000_000
@@ -98,12 +100,8 @@ class DraftFileStore:
                 stream.write(data)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, path)
-            directory_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            atomic_replace(temporary, path)
+            sync_directory(self.root)
         except OSError as error:
             raise DraftFileError(f"无法原子写入草稿文件：{error}") from error
         finally:

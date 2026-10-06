@@ -2,25 +2,15 @@ from __future__ import annotations
 
 import json
 import shutil
-import time
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from rpera.app import create_app
-from tests.helpers import make_data_dir, wait_for_turn
+from tests.helpers import make_data_dir, wait_for_revision, wait_for_turn
 from tests.test_prototype import ScriptedModelClient
 from tests.test_turn_images import png_bytes
-
-
-def wait_for_revision(path: Path) -> None:
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        if path.is_dir():
-            return
-        time.sleep(0.01)
-    raise AssertionError(f"回合检查点未完成：{path}")
 
 
 def test_branch_restores_completed_turn_files_and_history(tmp_path: Path) -> None:

@@ -1177,7 +1177,7 @@ function renderEvent(event) {
                 : `${event.type === "tool.failed" ? "调用失败" : "工具回复"} · ${toolLabel(tool)}`;
         }
         payload.append(event.type === "tool.started"
-            ? traceDataSection("调用参数", parseTraceInput(event.payload.input))
+            ? renderToolInput(tool, parseTraceInput(event.payload.input))
             : renderToolResult(tool, event.payload.result));
     } else {
         actor.textContent = agentLabel(event.payload.agent);
@@ -1301,10 +1301,67 @@ function appendReferenceList(container, label, items, describe) {
     container.append(section);
 }
 
+function traceRawDetail(label, text) {
+    const details = document.createElement("details");
+    details.className = "trace-detail trace-raw-detail";
+    const title = document.createElement("summary");
+    title.textContent = label;
+    const content = document.createElement("pre");
+    content.className = "trace-data";
+    content.textContent = text;
+    details.append(title, content);
+    return details;
+}
+
+function renderToolInput(tool, input) {
+    if (tool !== "story_summary_edit" || !input || typeof input !== "object" || Array.isArray(input)) {
+        return traceDataSection("调用参数", input);
+    }
+    const { old_text, new_text, ...metadata } = input;
+    if (typeof old_text !== "string" || typeof new_text !== "string") {
+        return traceDataSection("调用参数", input);
+    }
+    const section = traceDataSection("调用参数", metadata);
+    const fields = section.lastElementChild;
+    if (!Object.keys(metadata).length) fields.replaceChildren();
+    fields.append(traceRawDetail("原文", old_text), traceRawDetail("新文本", new_text));
+    return section;
+}
+
+function renderStorySummaryResult(result) {
+    const turns = result?.summary?.turns;
+    if (result?.ok === false || !Array.isArray(turns) || !turns.every((turn) =>
+        turn && Number.isInteger(turn.turn_number) && turn.turn_number > 0 && typeof turn.summary === "string"
+    )) return null;
+
+    const section = traceSection(`故事摘要 · 共 ${turns.length} 个回合`, "", false);
+    section.classList.add("trace-story-summary");
+    const content = section.lastElementChild;
+    if (typeof result.path === "string") {
+        const path = document.createElement("div");
+        path.className = "trace-summary-path";
+        path.textContent = result.path;
+        content.append(path);
+    }
+    if (!turns.length) {
+        const empty = document.createElement("p");
+        empty.textContent = "暂无已总结回合";
+        content.append(empty);
+    }
+    for (const turn of turns) {
+        content.append(traceSection(`第 ${turn.turn_number} 回合`, turn.summary));
+    }
+    content.append(traceRawDetail("完整 JSON 原文", typeof result.content === "string"
+        ? result.content : JSON.stringify(result.summary, null, 2)));
+    return section;
+}
+
 function renderToolResult(tool, result) {
     const container = document.createElement("div");
     container.className = "trace-result";
-    container.append(traceDataSection("结果", result));
+    const summary = ["story_summary_read", "story_summary_edit"].includes(tool)
+        ? renderStorySummaryResult(result) : null;
+    container.append(summary || traceDataSection("结果", result));
     return container;
 }
 

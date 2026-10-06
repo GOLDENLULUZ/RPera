@@ -12,6 +12,7 @@ from rpera.models import ModelResult, ToolCall
 from rpera.openai_responses import request_payload as responses_payload
 from rpera.providers import ModelClient
 from tests.helpers import make_data_dir, wait_for_turn
+from tests.model_text_helpers import decode_model_text
 from tests.prompt_fixtures import CHARACTER_DESIGNER_PROMPT, COMPLIANCE_REVIEWER_PROMPT, COORDINATOR_PROMPT, NARRATOR_PROMPT, ROLE_PLAYER_PROMPT, WORLD_RESEARCHER_PROMPT
 
 
@@ -34,7 +35,7 @@ class TransferModel:
 
     async def complete(self, system_prompt: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> ModelResult:
         self.received.setdefault(system_prompt, []).append(messages)
-        results = [json.loads(message["content"]) for message in messages if message["role"] == "tool"]
+        results = [decode_model_text(message["content"]) for message in messages if message["role"] == "tool"]
         if system_prompt == COORDINATOR_PROMPT:
             tasks = [result for result in results if "task_id" in result]
             if not tasks:
@@ -83,7 +84,7 @@ def test_transfers_are_persisted_as_separate_calls_before_model_request(tmp_path
     }
     for prompt, expected_tools in expected.items():
         messages = model.received[prompt][0]
-        user = next(value for item in messages if item["role"] == "user" and isinstance(item["content"], str) and item["content"].startswith("{") if "task" in (value := json.loads(item["content"])))
+        user = next(value for item in messages if item["role"] == "user" and isinstance(item["content"], str) if "task" in (value := decode_model_text(item["content"])))
         assert "report_documents" not in user
         assert "related_entity_documents" not in user
         synthetic = [item for item in messages if item.get("tool_calls") and item["tool_calls"][0]["id"].startswith("call-")]
@@ -91,7 +92,7 @@ def test_transfers_are_persisted_as_separate_calls_before_model_request(tmp_path
         for item in synthetic:
             call = item["tool_calls"][0]
             reply = next(value for value in messages if value["role"] == "tool" and value["tool_call_id"] == call["id"])
-            output = json.loads(reply["content"])
+            output = decode_model_text(reply["content"])
             assert output["target_agent"]
             if call["function"]["name"] == "entity_read":
                 assert set(json.loads(call["function"]["arguments"])) == {"paths"}
@@ -104,7 +105,7 @@ def test_transfers_are_persisted_as_separate_calls_before_model_request(tmp_path
             assert indexes[1] == indexes[0] + 2
 
     continued = model.received[ROLE_PLAYER_PROMPT][1]
-    assert json.loads([item["content"] for item in continued if item["role"] == "user"][-1])["continuation"] is True
+    assert decode_model_text([item["content"] for item in continued if item["role"] == "user"][-1])["continuation"] is True
     assert sum(item.get("role") == "tool" for item in continued) == 4
     assert [item["tool_calls"][0]["function"]["name"] for item in continued if item.get("tool_calls")] == ["entity_read", "report_read", "role_report", "report_read"]
 
@@ -137,7 +138,7 @@ def test_no_transfer_and_report_only_do_not_create_empty_entity_calls(tmp_path: 
     class ReportOnlyModel(TransferModel):
         async def complete(self, system_prompt: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> ModelResult:
             self.received.setdefault(system_prompt, []).append(messages)
-            results = [json.loads(message["content"]) for message in messages if message["role"] == "tool"]
+            results = [decode_model_text(message["content"]) for message in messages if message["role"] == "tool"]
             if system_prompt == COORDINATOR_PROMPT:
                 tasks = [result for result in results if "task_id" in result]
                 if not tasks:
@@ -150,8 +151,16 @@ def test_no_transfer_and_report_only_do_not_create_empty_entity_calls(tmp_path: 
                     call = ToolCall(id="publish", name="narrative_publish", arguments={"path": "narrative.md"})
                 return ModelResult(content="", raw_response={}, tool_calls=[call])
             if system_prompt == COMPLIANCE_REVIEWER_PROMPT:
+                names = {tool["function"]["name"] for tool in tools or []}
+                assert "entity_read" not in names
+                assert {"report_read", "compliance_report"} <= names
+                if not results:
+                    return ModelResult(content="", raw_response={}, tool_calls=[ToolCall(id="blocked-entity-read", name="entity_read", arguments={"paths": [PATH]})])
+                assert results[0]["ok"] is False
+                assert results[0]["error"]["message"] == "Agent compliance_reviewer 无权调用工具：entity_read"
                 return ModelResult(content="", raw_response={}, tool_calls=[ToolCall(id="approved", name="compliance_report", arguments={"approved": True, "reason": "通过"})])
             if system_prompt == ROLE_PLAYER_PROMPT:
+                assert {"entity_read", "report_read"} <= {tool["function"]["name"] for tool in tools or []}
                 assert len(results) == 1 and results[0]["report_documents"][0]["source_agent"] == "compliance_reviewer"
                 return ModelResult(content="", raw_response={}, tool_calls=[ToolCall(id="role", name="role_report", arguments={"report": "角色意见"})])
             if system_prompt == NARRATOR_PROMPT:
@@ -175,6 +184,9 @@ def test_no_transfer_and_report_only_do_not_create_empty_entity_calls(tmp_path: 
     assert synthetic_names(NARRATOR_PROMPT) == []
     with app.state.saves.connect(save["id"]) as db:
         assert [row[0] for row in db.execute("SELECT tool_name FROM parts WHERE provider_call_id LIKE 'call-%'")] == ["report_read"]
+        blocked = db.execute("SELECT state,output FROM parts WHERE provider_call_id = 'blocked-entity-read'").fetchone()
+        assert blocked["state"] == "error"
+        assert json.loads(blocked["output"])["error"]["message"] == "Agent compliance_reviewer 无权调用工具：entity_read"
 
 
 def test_child_can_read_unprovided_entity_and_verified_report(tmp_path: Any) -> None:
@@ -183,7 +195,7 @@ def test_child_can_read_unprovided_entity_and_verified_report(tmp_path: Any) -> 
 
         async def complete(self, system_prompt: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> ModelResult:
             self.received.setdefault(system_prompt, []).append(messages)
-            results = [json.loads(message["content"]) for message in messages if message["role"] == "tool"]
+            results = [decode_model_text(message["content"]) for message in messages if message["role"] == "tool"]
             if system_prompt == COORDINATOR_PROMPT:
                 tasks = [item for item in results if "task_id" in item]
                 if not tasks:
@@ -234,7 +246,7 @@ def test_character_designer_rereads_current_file_after_edit(tmp_path: Any) -> No
     class EditingModel(TransferModel):
         async def complete(self, system_prompt: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> ModelResult:
             self.received.setdefault(system_prompt, []).append(messages)
-            results = [json.loads(message["content"]) for message in messages if message["role"] == "tool"]
+            results = [decode_model_text(message["content"]) for message in messages if message["role"] == "tool"]
             if system_prompt == COORDINATOR_PROMPT:
                 tasks = [item for item in results if "task_id" in item]
                 if not tasks:

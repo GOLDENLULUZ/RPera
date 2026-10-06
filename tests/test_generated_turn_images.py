@@ -160,7 +160,7 @@ def test_generated_images_follow_uploaded_images_into_frozen_story_and_provider_
     arguments = {"image_reader": saves.read_turn_image_data, "generated_reader": saves.read_generated_image_data}
     main = AgentRunner._provider_messages(session, frozen, save.id, coordinator=True, **arguments)
     assert main[2]["role"] == "user"
-    assert main[2]["content"][1]["image_url"]["url"].endswith(base64.b64encode(upload).decode("ascii"))
+    assert main[2]["content"][2]["image_url"]["url"].endswith(base64.b64encode(upload).decode("ascii"))
     assert main[3] == {"role": "assistant", "content": "第一段故事"}
     assert main[4]["role"] == "user"
     assert "非玩家上传" in main[4]["content"][0]["text"]

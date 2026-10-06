@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import ValidationError
 
 from .agents import ComplianceReviewResult, RECOMMENDED_SEQUENCE_PLACEHOLDER, AgentRegistry
+from .model_text import render_model_text
 from .models import SaveNarrativeSettings
 
 
@@ -21,7 +21,7 @@ def render_save_narrative_settings(template: str, settings: SaveNarrativeSetting
     }[settings.play_mode]
     person = {"first": "第一人称", "second": "第二人称", "third": "第三人称"}[settings.narrative_person]
     language = {"zh": "中文", "ja": "日语", "en": "英语"}[settings.language]
-    requirements = json.dumps(settings.other_requirements, ensure_ascii=False) if settings.other_requirements else "无"
+    requirements = "\n" + render_model_text({"other_requirements": settings.other_requirements}) if settings.other_requirements else "无"
     person_instruction = f"{person}。"
     if settings.play_mode == "director":
         person_instruction += "不预设人称所指的故事人物；如需指定，以其他要求为准。"

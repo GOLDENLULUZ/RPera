@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -39,7 +40,8 @@ def test_network_settings_api_persists_and_masks_password(tmp_path: Path) -> Non
 
         path = data_dir / "config" / "network_settings.json"
         assert "proxy-secret" in path.read_text(encoding="utf-8")
-        assert path.stat().st_mode & 0o777 == 0o600
+        if os.name != "nt":
+            assert path.stat().st_mode & 0o777 == 0o600
 
         preserved = client.put(
             "/api/network-settings",
